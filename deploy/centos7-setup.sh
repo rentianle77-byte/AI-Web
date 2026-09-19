@@ -64,9 +64,22 @@ if [ ! -x "$CONDA_DIR/bin/conda" ]; then
     rm -f "$MC"
   done
   [ -s "$MC" ] || die "Miniconda 下载失败,请检查服务器能否访问外网"
-  bash "$MC" -b -p "$CONDA_DIR" >/dev/null || die "Miniconda 安装失败"
+
+  # 上一次跑到一半留下的残目录会让安装器直接罢工
+  # (报 "File or directory already exists"),先清掉。
+  if [ -d "$CONDA_DIR" ] && [ ! -x "$CONDA_DIR/bin/conda" ]; then
+    echo "  清理上次残留的 $CONDA_DIR"
+    rm -rf "$CONDA_DIR"
+  fi
+
+  # -u 允许覆盖已有安装;不要把输出丢掉,否则出错时无从排查
+  echo "  开始安装(约 1 分钟)..."
+  if ! bash "$MC" -b -u -p "$CONDA_DIR"; then
+    die "Miniconda 安装失败,错误见上方输出。常见原因:磁盘空间不足、/opt 权限问题、glibc 过旧"
+  fi
   rm -f "$MC"
 fi
+[ -x "$CONDA_DIR/bin/conda" ] || die "$CONDA_DIR/bin/conda 不存在,安装未成功"
 echo "  Miniconda 就绪:$("$CONDA_DIR/bin/conda" --version)"
 
 # --------------------------------------------------------------- 4. 拉取代码
@@ -94,12 +107,14 @@ echo "  $(git -C "$APP_DIR" log --oneline -1)"
 say "5/8 创建 Python 3.12 环境并安装依赖(约 2-4 分钟)"
 VENV="$APP_DIR/backend/.venv"
 if [ ! -x "$VENV/bin/python" ]; then
-  "$CONDA_DIR/bin/conda" create -y -q -p "$VENV" python=3.12 >/dev/null || die "创建 Python 环境失败"
+  "$CONDA_DIR/bin/conda" create -y -p "$VENV" python=3.12 || die "创建 Python 环境失败,错误见上方"
 fi
 "$VENV/bin/pip" install -q --upgrade pip
-"$VENV/bin/pip" install -q -i https://pypi.tuna.tsinghua.edu.cn/simple -r "$APP_DIR/backend/requirements.txt" \
-  || "$VENV/bin/pip" install -q -r "$APP_DIR/backend/requirements.txt" \
-  || die "依赖安装失败"
+echo "  从清华源安装依赖..."
+if ! "$VENV/bin/pip" install -q -i https://pypi.tuna.tsinghua.edu.cn/simple -r "$APP_DIR/backend/requirements.txt"; then
+  echo "  清华源失败,改用官方源重试(会慢一些)"
+  "$VENV/bin/pip" install -r "$APP_DIR/backend/requirements.txt" || die "依赖安装失败,错误见上方"
+fi
 echo "  $("$VENV/bin/python" -V) 依赖安装完成"
 
 # ------------------------------------------------------------------ 6. 数据库
