@@ -1,0 +1,31 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "express-backend",
+      "runtimeExecutable": "/Users/yao/Desktop/express-agent/backend/.venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "main:app",
+        "--reload",
+        "--port",
+        "8000",
+        "--app-dir",
+        "/Users/yao/Desktop/express-agent/backend"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "express-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "/Users/yao/Desktop/express-agent/frontend"
+      ],
+      "port": 5173
+    }
+  ]
+}
