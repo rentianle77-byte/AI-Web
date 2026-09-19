@@ -4,6 +4,20 @@
 
 > 下面所有命令在服务器上执行。假设代码放在 `/opt/express-agent`。
 
+## CentOS 7 用户请走这里
+
+CentOS 7 已于 2024 年 6 月停止维护,yum 源下线、自带 Python 3.6、glibc 2.17 装不了 Node 18+,
+照下面的通用步骤会连续踩坑。用专门的脚本:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rentianle77-byte/AI-Web/main/deploy/centos7-setup.sh -o setup.sh
+bash setup.sh
+```
+
+脚本会自动:切 yum 源到 vault、用 Miniconda 装 Python 3.12、建 MariaDB 库并生成连接串、
+配好 systemd 与 nginx。剩下两件事要你做:填大模型 key、**在本地构建前端后上传 dist**
+(CentOS 7 跑不了 Node 18+,前端必须在别处构建)。
+
 ---
 
 ## 0. 装依赖
