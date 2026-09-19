@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Ubuntu 22.04 / 24.04 一键部署(含前端构建,全部在服务器完成)
+# Ubuntu 一键部署(22.04 / 24.04 / 26.04,含前端构建,全部在服务器完成)
 #
 # 用法:以 root 执行
 #   curl -fsSL https://raw.githubusercontent.com/rentianle77-byte/AI-Web/main/deploy/ubuntu-setup.sh -o setup.sh
 #   bash setup.sh
 #
-# 和 CentOS 7 的区别:Ubuntu 22.04+ 的 glibc 是 2.35,Node 20 和现代 Python 轮子
+# 和 CentOS 7 的区别:Ubuntu 22.04+ 的 glibc 是 2.35 起步,Node 20 和现代 Python 轮子
 # 都能直接用,所以前端也能在服务器上构建,不用先在本地打包再上传。
 
 set -euo pipefail
@@ -28,36 +28,63 @@ export DEBIAN_FRONTEND=noninteractive
 # ------------------------------------------------------------------ 1. 基础包
 say "1/8 更新软件源并安装基础软件"
 apt-get update -qq || die "apt update 失败,检查网络"
-apt-get install -y -qq curl git nginx mysql-server ca-certificates gnupg >/dev/null \
+# build-essential 与 python3-dev 是保险:万一系统自带的 Python 版本太新、
+# 某些包还没出预编译轮子,pip 可以现场编译。Ubuntu 的 gcc 足够新,
+# 不像 CentOS 7 的 gcc 4.8.5 连 C++17 都不支持。
+apt-get install -y -qq curl git nginx mysql-server ca-certificates gnupg \
+                      build-essential python3-dev pkg-config >/dev/null \
   || die "基础软件安装失败"
 echo "  完成"
 
 # ------------------------------------------------------------------ 2. Python
-say "2/8 准备 Python 3.12"
-PY=""
-for c in python3.12 python3.11 python3.10; do
-  command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
-done
+say "2/8 准备 Python(需要 3.10 以上)"
+# 不同 Ubuntu 版本自带的 Python 不一样(22.04 是 3.10、24.04 是 3.12、26.04 更新),
+# 所以按优先级找一个能用的,而不是写死版本号。
+# 优先 3.12/3.13:这两个版本第三方轮子最齐全;太新的版本有些包还没出预编译包。
+pick_python() {
+  for c in python3.12 python3.13 python3.11 python3.10 python3; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null \
+      && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+PY="$(pick_python || true)"
 if [ -z "$PY" ]; then
-  # 22.04 自带 3.10、24.04 自带 3.12,都满足 >=3.10 的要求;
-  # 万一都没有,从 deadsnakes 装 3.12
-  apt-get install -y -qq software-properties-common >/dev/null
-  add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
-  apt-get update -qq
-  apt-get install -y -qq python3.12 python3.12-venv >/dev/null || die "Python 3.12 安装失败"
-  PY=python3.12
+  echo "  系统没有 3.10+ 的 Python,尝试从 apt 安装"
+  apt-get install -y -qq python3.12 python3.12-venv >/dev/null 2>&1 \
+    || apt-get install -y -qq python3 python3-venv >/dev/null 2>&1 || true
+  PY="$(pick_python || true)"
 fi
-apt-get install -y -qq "${PY}-venv" >/dev/null 2>&1 || apt-get install -y -qq python3-venv >/dev/null 2>&1 || true
-echo "  使用 $($PY -V)"
+[ -n "$PY" ] || die "找不到 3.10 以上的 Python,请手动安装后重跑"
+
+# venv 模块在 Ubuntu 上是单独的包,缺了会在建虚拟环境时才报错
+if ! "$PY" -m venv --help >/dev/null 2>&1; then
+  PYV="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  apt-get install -y -qq "python${PYV}-venv" >/dev/null 2>&1 \
+    || apt-get install -y -qq python3-venv >/dev/null 2>&1 \
+    || die "无法安装 venv 模块(python${PYV}-venv)"
+fi
+echo "  使用 $("$PY" -V)"
 
 # -------------------------------------------------------------------- 3. Node
-say "3/8 安装 Node 20(用于构建前端)"
-if ! command -v node >/dev/null 2>&1 || [ "$(node -v | sed 's/v\([0-9]*\).*/\1/')" -lt 18 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 \
-    || die "NodeSource 源配置失败"
-  apt-get install -y -qq nodejs >/dev/null || die "Node 安装失败"
+say "3/8 准备 Node(构建前端需要 18 以上)"
+node_major() { command -v node >/dev/null 2>&1 && node -v | sed 's/v\([0-9]*\).*/\1/' || echo 0; }
+
+if [ "$(node_major)" -lt 18 ]; then
+  # 先试系统源:新版 Ubuntu 自带的 nodejs 通常已经够新,比加第三方源稳
+  apt-get install -y -qq nodejs npm >/dev/null 2>&1 || true
 fi
-echo "  Node $(node -v) / npm $(npm -v)"
+if [ "$(node_major)" -lt 18 ]; then
+  echo "  系统源的 Node 太旧,改用 NodeSource"
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 \
+    || warn "NodeSource 配置失败(可能还不支持本系统版本)"
+  apt-get install -y -qq nodejs >/dev/null 2>&1 || true
+fi
+[ "$(node_major)" -ge 18 ] || die "Node 18+ 安装失败,当前 $(node -v 2>/dev/null || echo '未安装')"
+command -v npm >/dev/null 2>&1 || apt-get install -y -qq npm >/dev/null 2>&1 || true
+echo "  Node $(node -v) / npm $(npm -v 2>/dev/null || echo '缺失')"
 
 # ------------------------------------------------------------------ 4. 拉代码
 say "4/8 拉取代码到 $APP_DIR"
