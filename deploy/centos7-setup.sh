@@ -81,8 +81,10 @@ echo "  $("$PY_DIR/bin/python3.12" -V) 就绪(自带 OpenSSL,不依赖系统的 
 
 # --------------------------------------------------------------- 4. 拉取代码
 say "4/8 拉取代码到 $APP_DIR"
+# CentOS 7 的 git 是 1.8.3.1,不支持 git -C(1.8.5 才加),一律用子 shell cd
 if [ -d "$APP_DIR/.git" ]; then
-  git -C "$APP_DIR" pull --ff-only || warn "git pull 失败,使用现有代码"
+  ( cd "$APP_DIR" && git fetch --depth 1 origin main && git reset --hard origin/main ) \
+    || warn "更新代码失败,使用现有版本"
 elif [ -d "$APP_DIR" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
   # 目录已存在且非空(比如前端 dist 已经先传上来了)。
   # git clone 不允许克隆进非空目录,所以先克隆到临时目录再合并,
@@ -93,11 +95,11 @@ elif [ -d "$APP_DIR" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
   cp -rn "$TMP/repo/." "$APP_DIR/" 2>/dev/null || true
   cp -r "$TMP/repo/.git" "$APP_DIR/.git"
   rm -rf "$TMP"
-  git -C "$APP_DIR" checkout -- . 2>/dev/null || true
+  ( cd "$APP_DIR" && git checkout -- . ) 2>/dev/null || true
 else
   git clone --depth 1 "$REPO" "$APP_DIR" || die "克隆失败"
 fi
-echo "  $(git -C "$APP_DIR" log --oneline -1)"
+echo "  $(cd "$APP_DIR" && git log --oneline -1 2>/dev/null || echo '(无法读取版本)')"
 [ -f "$APP_DIR/frontend/dist/index.html" ] && echo "  已检测到前端 dist,无需再上传"
 
 # ------------------------------------------------------------- 5. Python 环境
