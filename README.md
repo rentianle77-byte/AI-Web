@@ -217,13 +217,10 @@ cd ~/Desktop/express-agent && backend/.venv/bin/python -m pytest backend/tests -
 
 ## 部署到服务器
 
+完整步骤见 **[deploy/DEPLOY.md](deploy/DEPLOY.md)**,含 nginx 配置、systemd 服务、MySQL 建库,
+以及四个容易踩的坑(vite 代理不能用于线上、SSE 被 nginx 缓冲、uvicorn 只能开 1 个 worker、MySQL 字符集)。
+
 ```bash
-# 后端
-backend/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --app-dir backend
-
-# 前端(构建静态文件,交给 nginx / caddy)
-cd frontend && npm run build   # 产物在 frontend/dist
+git clone https://github.com/rentianle77-byte/AI-Web.git /opt/express-agent
+cd /opt/express-agent && cat deploy/DEPLOY.md
 ```
-
-服务器上记得:改 `DATABASE_URL` 为 MySQL、填大模型 Key、在 `backend/main.py` 的
-`CORSMiddleware` 里加上线上域名。

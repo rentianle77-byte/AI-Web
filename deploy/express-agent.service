@@ -1,0 +1,33 @@
+# systemd 服务:开机自启、崩溃自动重启
+# 放到 /etc/systemd/system/express-agent.service
+#   systemctl daemon-reload
+#   systemctl enable --now express-agent
+#   journalctl -u express-agent -f      # 看日志
+
+[Unit]
+Description=Express Agent backend (FastAPI)
+After=network.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/express-agent/backend
+EnvironmentFile=/opt/express-agent/backend/.env
+
+# 注意 --workers 只能是 1。
+# 主动跟进的调度器跑在进程内,多开 worker 会让同一条跟进被触发多次,
+# 用户会收到重复消息。需要扩容时改用外部调度(见 DEPLOY.md 末尾)。
+ExecStart=/opt/express-agent/backend/.venv/bin/uvicorn main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 --app-dir /opt/express-agent/backend
+
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# 基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

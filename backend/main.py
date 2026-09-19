@@ -47,9 +47,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 本地开发默认放行 vite;线上用 nginx 把前端和 /api 放在同一个域名下,
+# 本来不需要 CORS。如果前后端分域名部署,在 .env 里设 CORS_ORIGINS=https://你的域名
+DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:4173", "http://127.0.0.1:4173"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:4173", "http://127.0.0.1:4173"],
+    allow_origins=settings.cors_origins or DEV_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -36,6 +36,7 @@ class Settings:
     kuaidi100_customer: str | None
     knowledge_dir: Path
     data_dir: Path
+    cors_origins: list[str]
     followup_interval: int
     max_tool_iterations: int
     max_tokens: int
@@ -93,6 +94,7 @@ def load_settings() -> Settings:
         kuaidi100_customer=_env("KUAIDI100_CUSTOMER"),
         knowledge_dir=BACKEND_DIR / "knowledge",
         data_dir=data_dir,
+        cors_origins=[o.strip() for o in (_env("CORS_ORIGINS") or "").split(",") if o.strip()],
         followup_interval=int(_env("FOLLOWUP_CHECK_INTERVAL", "10")),
         max_tool_iterations=int(_env("MAX_TOOL_ITERATIONS", "12")),
         max_tokens=int(_env("LLM_MAX_TOKENS", "8000")),
