@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/rentianle77-byte/AI-Web/main/deploy
 bash setup.sh
 ```
 
-脚本会自动:切 yum 源到 vault、用 Miniconda 装 Python 3.12、建 MariaDB 库并生成连接串、
+脚本会自动:切 yum 源到 vault、装一份独立的 Python 3.12、建 MariaDB 库并生成连接串、
 配好 systemd 与 nginx。剩下两件事要你做:填大模型 key、**在本地构建前端后上传 dist**
 (CentOS 7 跑不了 Node 18+,前端必须在别处构建)。
 
@@ -212,7 +212,21 @@ systemctl restart express-agent
 
 `deploy/express-agent.service` 里写死了 `--workers 1`。以这个产品的场景(每次请求都在等大模型,瓶颈在模型不在 CPU),单 worker 足够。真要扩容,得先把调度器拆成独立进程,并给 `followups` 表加一个基于数据库的抢占锁。
 
-### 4. MySQL 字符集
+### 4. glibc 2.17 卡住一切现代工具链
+
+CentOS 7 的 glibc 是 2.17,而如今很多官方二进制都以 2.28 为基线,会直接拒绝运行:
+
+| 想装的东西 | 结果 |
+| --- | --- |
+| Node 18+ | 装不上,Vite 5 构建只能在别的机器做 |
+| 最新版 Miniconda | 安装器报 `Installer requires GLIBC >=2.28` |
+| 系统自带 Python | 只有 3.6.8,而依赖要求 3.10+ |
+
+脚本的解法是 python-build-standalone 的独立构建:它的 `x86_64-unknown-linux-gnu`
+目标就以 glibc 2.17 为基线,且自带 OpenSSL 3(CentOS 7 系统只有 1.0.2,装不了现代 Python)。
+实测该发行包内所有二进制要求的最高 glibc 符号正好是 2.17。
+
+### 5. MySQL 字符集
 
 必须是 `utf8mb4`。用 `utf8` 会在存 emoji 或部分中文时报错。建库语句里已经指定了,连接串末尾的 `?charset=utf8mb4` 也不能少。
 

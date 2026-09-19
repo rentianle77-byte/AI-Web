@@ -7,13 +7,14 @@
 #
 # 这个脚本处理 CentOS 7 的三个特殊问题:
 #   1. CentOS 7 已 EOL,官方 yum 源下线 → 切到 vault.centos.org
-#   2. 自带 Python 3.6,而项目需要 3.10+ → 用 Miniconda 装 3.12(避开源码编译 OpenSSL 的坑)
+#   2. 自带 Python 3.6,项目需要 3.10+;而最新 Miniconda 同样要求 glibc 2.28
+#      → 用 python-build-standalone 的独立构建(基线就是 glibc 2.17,自带 OpenSSL 3)
 #   3. Node 18+ 需要 glibc 2.28,CentOS 7 只有 2.17 → 前端不在服务器构建,在本地构建后上传
 
 set -euo pipefail
 
 APP_DIR=/opt/express-agent
-CONDA_DIR=/opt/miniconda3
+PY_DIR=/opt/python312
 REPO=https://github.com/rentianle77-byte/AI-Web.git
 DB_NAME=express_agent
 DB_USER=express
@@ -44,43 +45,39 @@ yum install -y -q wget bzip2 git nginx mariadb-server mariadb || die "基础软�
 echo "  完成"
 
 # ------------------------------------------------------------- 3. Python 3.12
-say "3/8 安装 Python 3.12(通过 Miniconda,避开 CentOS 7 的 OpenSSL/gcc 版本问题)"
-if [ ! -x "$CONDA_DIR/bin/conda" ]; then
-  # 用 curl 不用 wget:CentOS 7 的 wget 是 1.14,不认 --show-progress。
-  # 国内源优先,否则从 repo.anaconda.com 下 150MB 会非常慢。
-  MC=/tmp/miniconda.sh
-  rm -f "$MC"
-  for u in \
-    https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
-    https://mirrors.aliyun.com/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
-    https://mirrors.bfsu.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
-    https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+say "3/8 安装 Python 3.12"
+# 为什么不用 Miniconda:最新版 Miniconda 的安装器要求 glibc >= 2.28,
+# 而 CentOS 7 是 2.17,会直接拒绝安装(和 Node 18+ 撞的是同一堵墙)。
+# 改用 python-build-standalone 的独立构建:它的 x86_64-unknown-linux-gnu
+# 目标就是以 glibc 2.17 为基线,且自带 OpenSSL 3,不依赖系统那个 1.0.2。
+PY_VER=3.12.14
+PY_REL=20260901
+PY_TGZ="cpython-${PY_VER}+${PY_REL}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+
+if [ ! -x "$PY_DIR/bin/python3.12" ]; then
+  T=/tmp/python312.tar.gz
+  rm -f "$T"
+  for base in \
+    https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download \
+    https://gh-proxy.com/https://github.com/astral-sh/python-build-standalone/releases/download \
+    https://github.com/astral-sh/python-build-standalone/releases/download
   do
-    echo "  尝试:${u%%/anaconda*}"
-    if curl -fL --connect-timeout 10 --retry 2 -o "$MC" "$u" && [ -s "$MC" ]; then
-      echo "  下载完成($(du -h "$MC" | cut -f1))"
+    echo "  尝试:${base%%/https*}"
+    if curl -fL --connect-timeout 15 --retry 1 -o "$T" "$base/$PY_REL/$PY_TGZ" && [ -s "$T" ]; then
+      echo "  下载完成($(du -h "$T" | cut -f1))"
       break
     fi
-    rm -f "$MC"
+    rm -f "$T"
   done
-  [ -s "$MC" ] || die "Miniconda 下载失败,请检查服务器能否访问外网"
+  [ -s "$T" ] || die "Python 3.12 下载失败,请检查服务器外网访问"
 
-  # 上一次跑到一半留下的残目录会让安装器直接罢工
-  # (报 "File or directory already exists"),先清掉。
-  if [ -d "$CONDA_DIR" ] && [ ! -x "$CONDA_DIR/bin/conda" ]; then
-    echo "  清理上次残留的 $CONDA_DIR"
-    rm -rf "$CONDA_DIR"
-  fi
-
-  # -u 允许覆盖已有安装;不要把输出丢掉,否则出错时无从排查
-  echo "  开始安装(约 1 分钟)..."
-  if ! bash "$MC" -b -u -p "$CONDA_DIR"; then
-    die "Miniconda 安装失败,错误见上方输出。常见原因:磁盘空间不足、/opt 权限问题、glibc 过旧"
-  fi
-  rm -f "$MC"
+  rm -rf "$PY_DIR"
+  mkdir -p "$PY_DIR"
+  tar xzf "$T" -C "$PY_DIR" --strip-components=1 || die "解压失败"
+  rm -f "$T"
 fi
-[ -x "$CONDA_DIR/bin/conda" ] || die "$CONDA_DIR/bin/conda 不存在,安装未成功"
-echo "  Miniconda 就绪:$("$CONDA_DIR/bin/conda" --version)"
+"$PY_DIR/bin/python3.12" -V >/dev/null 2>&1 || die "Python 无法执行,请把上面的报错发出来"
+echo "  $("$PY_DIR/bin/python3.12" -V) 就绪(自带 OpenSSL,不依赖系统的 1.0.2)"
 
 # --------------------------------------------------------------- 4. 拉取代码
 say "4/8 拉取代码到 $APP_DIR"
@@ -104,10 +101,10 @@ echo "  $(git -C "$APP_DIR" log --oneline -1)"
 [ -f "$APP_DIR/frontend/dist/index.html" ] && echo "  已检测到前端 dist,无需再上传"
 
 # ------------------------------------------------------------- 5. Python 环境
-say "5/8 创建 Python 3.12 环境并安装依赖(约 2-4 分钟)"
+say "5/8 创建虚拟环境并安装依赖(约 2-4 分钟)"
 VENV="$APP_DIR/backend/.venv"
 if [ ! -x "$VENV/bin/python" ]; then
-  "$CONDA_DIR/bin/conda" create -y -p "$VENV" python=3.12 || die "创建 Python 环境失败,错误见上方"
+  "$PY_DIR/bin/python3.12" -m venv "$VENV" || die "创建虚拟环境失败"
 fi
 "$VENV/bin/pip" install -q --upgrade pip
 echo "  从清华源安装依赖..."
