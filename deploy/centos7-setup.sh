@@ -46,12 +46,26 @@ echo "  完成"
 # ------------------------------------------------------------- 3. Python 3.12
 say "3/8 安装 Python 3.12(通过 Miniconda,避开 CentOS 7 的 OpenSSL/gcc 版本问题)"
 if [ ! -x "$CONDA_DIR/bin/conda" ]; then
-  wget -q --show-progress -O /tmp/miniconda.sh \
+  # 用 curl 不用 wget:CentOS 7 的 wget 是 1.14,不认 --show-progress。
+  # 国内源优先,否则从 repo.anaconda.com 下 150MB 会非常慢。
+  MC=/tmp/miniconda.sh
+  rm -f "$MC"
+  for u in \
     https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
-    || wget -q -O /tmp/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
-    || die "Miniconda 下载失败"
-  bash /tmp/miniconda.sh -b -p "$CONDA_DIR" >/dev/null
-  rm -f /tmp/miniconda.sh
+    https://mirrors.aliyun.com/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    https://mirrors.bfsu.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+  do
+    echo "  尝试:${u%%/anaconda*}"
+    if curl -fL --connect-timeout 10 --retry 2 -o "$MC" "$u" && [ -s "$MC" ]; then
+      echo "  下载完成($(du -h "$MC" | cut -f1))"
+      break
+    fi
+    rm -f "$MC"
+  done
+  [ -s "$MC" ] || die "Miniconda 下载失败,请检查服务器能否访问外网"
+  bash "$MC" -b -p "$CONDA_DIR" >/dev/null || die "Miniconda 安装失败"
+  rm -f "$MC"
 fi
 echo "  Miniconda 就绪:$("$CONDA_DIR/bin/conda" --version)"
 
@@ -59,10 +73,22 @@ echo "  Miniconda 就绪:$("$CONDA_DIR/bin/conda" --version)"
 say "4/8 拉取代码到 $APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" pull --ff-only || warn "git pull 失败,使用现有代码"
+elif [ -d "$APP_DIR" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
+  # 目录已存在且非空(比如前端 dist 已经先传上来了)。
+  # git clone 不允许克隆进非空目录,所以先克隆到临时目录再合并,
+  # 已上传的 frontend/dist 和 backend/.env 都会原样保留。
+  echo "  $APP_DIR 已有内容,改用合并方式(保留已上传的前端与配置)"
+  TMP="$(mktemp -d)"
+  git clone --depth 1 "$REPO" "$TMP/repo" || die "克隆失败"
+  cp -rn "$TMP/repo/." "$APP_DIR/" 2>/dev/null || true
+  cp -r "$TMP/repo/.git" "$APP_DIR/.git"
+  rm -rf "$TMP"
+  git -C "$APP_DIR" checkout -- . 2>/dev/null || true
 else
   git clone --depth 1 "$REPO" "$APP_DIR" || die "克隆失败"
 fi
 echo "  $(git -C "$APP_DIR" log --oneline -1)"
+[ -f "$APP_DIR/frontend/dist/index.html" ] && echo "  已检测到前端 dist,无需再上传"
 
 # ------------------------------------------------------------- 5. Python 环境
 say "5/8 创建 Python 3.12 环境并安装依赖(约 2-4 分钟)"
@@ -78,20 +104,24 @@ echo "  $("$VENV/bin/python" -V) 依赖安装完成"
 
 # ------------------------------------------------------------------ 6. 数据库
 say "6/8 配置数据库(MariaDB,与 MySQL 协议兼容)"
-systemctl enable --now mariadb >/dev/null 2>&1
+# CentOS 7 的 systemd 是 219,不支持 enable --now,必须拆成两条
+systemctl enable mariadb >/dev/null 2>&1 || true
+systemctl start mariadb >/dev/null 2>&1 || die "MariaDB 启动失败,执行 journalctl -u mariadb 查看原因"
 sleep 2
 if [ -f "$APP_DIR/backend/.db_password" ]; then
   DB_PASS="$(cat "$APP_DIR/backend/.db_password")"
   echo "  复用已有的数据库密码"
 else
-  DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)"
+  # 不用 tr </dev/urandom | head:set -o pipefail 下 tr 会因 SIGPIPE 让整条管道失败
+  DB_PASS="$(openssl rand -hex 12)"
   umask 077 && echo "$DB_PASS" > "$APP_DIR/backend/.db_password"
   echo "  已生成数据库密码,存于 backend/.db_password"
 fi
-mysql -uroot <<SQL || die "数据库配置失败(如果 root 已设密码,请手动执行 deploy/DEPLOY.md 第 2 步)"
+# CentOS 7 自带 MariaDB 5.5,不支持 CREATE USER IF NOT EXISTS(10.1.3 才有),
+# 用 GRANT ... IDENTIFIED BY,它在旧版里会自动建用户,新版也兼容。
+mysql -uroot <<SQL || die "数据库配置失败(若 root 已设密码,请手动执行 deploy/DEPLOY.md 第 2 步建库)"
 CREATE DATABASE IF NOT EXISTS $DB_NAME DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
-GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
 FLUSH PRIVILEGES;
 SQL
 echo "  数据库 $DB_NAME 就绪"
@@ -131,11 +161,18 @@ mkdir -p /etc/nginx/conf.d
 cp "$APP_DIR/deploy/nginx.conf" /etc/nginx/conf.d/express-agent.conf
 IP="$(curl -s -m 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
 [ -n "$IP" ] && sed -i "s/server_name .*/server_name ${IP};/" /etc/nginx/conf.d/express-agent.conf
-# CentOS 7 的默认 nginx.conf 自带一个 server{listen 80 default},会和我们的冲突
-sed -i 's/^\(\s*\)listen\s*80;\(.*default_server\)/\1listen 80;\2/' /etc/nginx/nginx.conf 2>/dev/null || true
+# CentOS 7 默认 nginx.conf 里有个 listen 80 default_server 的欢迎页站点,
+# 不处理的话直接访问 IP 会打到 nginx 欢迎页,而不是我们的前端。
+# 把它的 default_server 摘掉,改由我们的站点接管。
+if grep -qE 'listen\s+80\s+default_server' /etc/nginx/nginx.conf 2>/dev/null; then
+  cp -n /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak 2>/dev/null || true
+  sed -i -E 's/listen\s+80\s+default_server;/listen 80;/' /etc/nginx/nginx.conf
+  sed -i -E 's/listen\s+\[::\]:80\s+default_server;/listen [::]:80;/' /etc/nginx/nginx.conf
+fi
+sed -i 's/^    listen 80;/    listen 80 default_server;/' /etc/nginx/conf.d/express-agent.conf
 nginx -t >/dev/null 2>&1 && echo "  nginx 配置检查通过" || warn "nginx -t 未通过,稍后手动执行 nginx -t 查看原因"
 
-systemctl enable nginx >/dev/null 2>&1
+systemctl enable nginx >/dev/null 2>&1 || true
 firewall-cmd --permanent --add-service=http >/dev/null 2>&1 || true
 firewall-cmd --reload >/dev/null 2>&1 || true
 
