@@ -4,6 +4,25 @@
 
 > 下面所有命令在服务器上执行。假设代码放在 `/opt/express-agent`。
 
+## 先选对系统
+
+| 系统 | 建议 |
+| --- | --- |
+| **Ubuntu 22.04 / 24.04** | 推荐。一条命令全自动,前端也能在服务器上构建 |
+| CentOS 7 | 能装但处处受限(见下),新项目不建议 |
+
+### Ubuntu(推荐)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rentianle77-byte/AI-Web/main/deploy/ubuntu-setup.sh -o setup.sh
+bash setup.sh
+```
+
+从装依赖、建库、装 Python 依赖、构建前端到配好 nginx 与 systemd 全部自动完成,
+跑完只需填一个大模型 key。
+
+---
+
 ## CentOS 7 用户请走这里
 
 CentOS 7 已于 2024 年 6 月停止维护,yum 源下线、自带 Python 3.6、glibc 2.17 装不了 Node 18+,
