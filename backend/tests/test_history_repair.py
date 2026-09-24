@@ -204,3 +204,73 @@ def test_repetition_hint_not_persisted():
 
     to_model = [l for l in src.splitlines() if 'history.append({"role": "tool"' in l]
     assert to_model and "hinted" in to_model[0], "发给模型的历史应该用加了提示的版本"
+
+
+# ---------------- FT-08:跟进触发提示不该在后续轮次反复生效 ----------------
+def test_followup_trigger_replaced_on_replay():
+    """跟进提示原文开头是「现在是系统触发的主动跟进时刻」。
+
+    原样回放的话,之后每轮普通对话都会读到这句;跟进做过几次以后
+    历史里堆着好几条,模型行为就飘了(测试报告 FT-08)。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.agent.runtime import FOLLOWUP_REPLAY_MARKER, add_message, build_llm_history
+    from app.db import Base
+    from app.models import Conversation
+
+    e = create_engine("sqlite://")
+    Base.metadata.create_all(e)
+    s = sessionmaker(bind=e)()
+    c = Conversation(title="t", agent_type="claim")
+    s.add(c)
+    s.commit()
+
+    add_message(s, c.id, "user", "我的快递坏了", {})
+    add_message(s, c.id, "assistant", "好的", {})
+    add_message(s, c.id, "user", "现在是系统触发的**主动跟进**时刻,不是用户在说话。\n请你:\n1. 先看任务当前进展……",
+                {"hidden": True, "is_followup_trigger": True, "followup_id": 1})
+    add_message(s, c.id, "assistant", "到点了,我帮你确认了一下", {"is_followup": True})
+    add_message(s, c.id, "user", "那接下来呢", {})
+    s.commit()
+
+    h = build_llm_history(s, c.id)
+    joined = " ".join(e["content"] for e in h if e["role"] == "user")
+    assert "系统触发的" not in joined or FOLLOWUP_REPLAY_MARKER in joined
+    assert "1. 先看任务当前进展" not in joined, "跟进指令原文不该被回放"
+    assert FOLLOWUP_REPLAY_MARKER in joined, "应该留一条简短标记保住时间线"
+    assert len([e for e in h if e["role"] == "user"]) == 3, "消息条数不变,只是内容换成标记"
+    s.close()
+
+
+# ---------------- GT-08:事件队列满了不该丢最新的 ----------------
+def test_event_bus_drops_oldest_not_newest():
+    """队列满时丢最旧的,保证订阅者永远能看到最新状态。"""
+    import asyncio
+
+    from app.events import EventBus
+
+    async def run():
+        bus = EventBus()
+        q = bus.subscribe()
+        total = q.maxsize + 20
+        for i in range(total):
+            bus.publish({"type": "task_update", "seq": i})
+        assert bus.dropped == 20, f"应该丢 20 条,实际 {bus.dropped}"
+        seen = []
+        while not q.empty():
+            seen.append(q.get_nowait()["seq"])
+        assert seen[-1] == total - 1, "最新的那条必须还在"
+        assert seen[0] == 20, "丢掉的应该是最旧的 20 条"
+
+    asyncio.run(run())
+
+
+def test_event_bus_stats_exposed():
+    from app.events import EventBus
+
+    bus = EventBus()
+    st = bus.stats()
+    assert set(st) == {"subscribers", "dropped", "queue_size"}
+    assert st["dropped"] == 0

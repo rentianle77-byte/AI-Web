@@ -116,6 +116,7 @@ def _query_tracking(ctx: ToolContext, args: dict) -> Any:
             "item": {"type": "string", "description": "物品名称"},
             "zone": {"type": "string", "enum": ["same_city", "domestic", "international"], "description": "同城/国内异地/国际,影响延误时限判定"},
             "damage_ratio": {"type": "number", "description": "损坏程度 0-1,完全损毁填 1,轻微损坏填 0.3 这样"},
+            "damage_visible_at_signing": {"type": "boolean", "description": "签收当时外包装是否就已明显破损。签收时看得见却还是签了,和签收后开箱才发现,两种情形的胜算差别很大,务必问清楚再传"},
         },
         ["problem_type"],
     ),

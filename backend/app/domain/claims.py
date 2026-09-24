@@ -32,6 +32,7 @@ def assess_claim(
     item: str | None = None,
     zone: str = "domestic",
     damage_ratio: float | None = None,
+    damage_visible_at_signing: bool | None = None,
 ) -> dict:
     company = normalize_company(company)
     problem_type = problem_type if problem_type in PROBLEM_LABEL else "damaged"
@@ -40,15 +41,75 @@ def assess_claim(
     zone = zone if zone in TOTAL_DELAY_DAYS else "domestic"
 
     # ---------- 责任方 ----------
-    if is_online_purchase:
-        if not signed:
-            primary, reason = "商家", "网购商品在签收前毁损、灭失的风险由卖家承担(民法典第 604、512 条),先找商家补发 / 退款,商家再自行向快递公司追偿"
+    # 签收是个分水岭:《民法典》第 604 条规定标的物毁损灭失的风险交付后转移,
+    # 第 512 条把网购件的交付时间定为收货人签收时间。所以签收之后,
+    # 举证责任实质上落到了收件人身上 —— 得先证明"破损发生在运输途中"。
+    #
+    # 但这不等于签收就一概不能索赔。运输途中造成的隐蔽破损,签收时肉眼看不出来,
+    # 只要能在合理期限内(实务通行 48 小时)反馈并拿出证据,仍可向承运人或商家主张。
+    # 所以这里不给非黑即白的结论,而是分三种情形,并把胜算和举证要求讲清楚。
+    risk_transferred = bool(signed)
+    if signed and damage_visible_at_signing:
+        # 外包装当场就看得出破损却签收了 —— 最不利的情形
+        stance = "weak"
+        burden = "收件人"
+        if is_online_purchase:
+            primary = "商家(但已处于不利地位)"
+            reason = (
+                "外包装在签收时已明显破损却未当场拒收或要求开箱验视,视为认可外观状态,"
+                "风险已随签收转移(民法典第 604、512 条)。仍可主张,但商家和快递大概率以"
+                "「签收视为验收」抗辩,需要更强的证据才能推翻。"
+            )
         else:
-            primary, reason = "商家(同时向快递公司投诉)", "签收后发现破损,尽快(建议 48 小时内)在平台申请“收到商品破损”并附开箱照片 / 视频;商家应先行处理,快递责任由商家与快递公司之间解决"
+            primary = "快递公司(但已处于不利地位)"
+            reason = (
+                "包装破损当场可见却签收,快递公司通常据此免责。《快递暂行条例》第 25 条"
+                "要求企业告知当面验收 —— 如果快递员从未告知或直接放驿站,这一点可以反过来主张。"
+            )
+        also = "关键在于证明快递员未履行告知验视义务:调取与快递员 / 驿站的沟通记录、驿站监控"
+    elif signed:
+        # 签收后开箱才发现内件破损 —— 可以主张,但要靠证据
+        stance = "conditional"
+        burden = "收件人"
+        if is_online_purchase:
+            primary = "商家(需先证明破损发生在运输途中)"
+            reason = (
+                "签收完成,风险已依民法典第 604、512 条转移至你。但内件破损属于开箱才能发现的"
+                "隐蔽瑕疵,实务上只要在合理期限内(通行 48 小时)反馈并能证明破损发生在运输途中,"
+                "仍可向商家主张。能否成立,取决于你手上的证据。"
+            )
+        else:
+            primary = "快递公司(需先证明破损发生在运输途中)"
+            reason = (
+                "签收后风险已转移,快递公司会以「签收视为验收」抗辩。要推翻这一点,"
+                "必须拿出破损发生在运输途中的证据,否则很难成立。"
+            )
+        also = "48 小时内反馈是关键时间点,越晚越难主张"
+    elif is_online_purchase:
+        # 尚未签收 —— 最有利
+        stance = "strong"
+        burden = "商家"
+        primary = "商家"
+        reason = (
+            "网购商品在签收前毁损、灭失的风险由卖家承担(民法典第 604、512 条),"
+            "找商家补发或退款即可,商家再自行向快递公司追偿,你不用夹在中间。"
+        )
         also = "如果商家推诿,可同时向快递公司客服报损、向平台申请介入"
     else:
-        primary, reason = "快递公司", "自寄件的运输合同相对方是快递公司,寄件人(或经寄件人授权的收件人)向快递公司索赔"
+        stance = "strong"
+        burden = "快递公司"
+        primary = "快递公司"
+        reason = "自寄件的运输合同相对方是快递公司,寄件人(或经寄件人授权的收件人)向快递公司索赔"
         also = "先打客服电话报损立案,拿到工单号;网点推诿就直接找总部客服"
+
+    # 签收后主张,证据齐不齐直接决定成败
+    if stance in ("conditional", "weak"):
+        if has_evidence:
+            likelihood = "中等" if stance == "conditional" else "较低"
+        else:
+            likelihood = "低(缺少开箱证据,对方几乎必然以签收视为验收拒赔)"
+    else:
+        likelihood = "高"
 
     # ---------- 延误判定 ----------
     delay_note = None
@@ -144,8 +205,13 @@ def assess_claim(
     ]
 
     risks = []
+    if risk_transferred:
+        risks.append(
+            f"已签收 → 风险已依民法典第 604 条转移,举证责任在{burden}。"
+            f"按现有信息估计成功率:{likelihood}"
+        )
     if signed and problem_type == "damaged" and not has_evidence:
-        risks.append("已签收且缺少开箱证据:快递公司很可能以“签收视为验收”拒赔,尽快补拍现状照片、找驿站监控")
+        risks.append("已签收且缺少开箱证据:对方很可能以“签收视为验收”拒赔,尽快补拍现状照片、找驿站监控")
     if not insured and value >= 500:
         risks.append("未保价高价值物品:公司条款只赔运费倍数,要靠价值凭证和法条据理力争,做好协商准备")
     if problem_type == "lost" and (days_delayed or 0) < TOTAL_DELAY_DAYS[zone]:
@@ -164,7 +230,15 @@ def assess_claim(
         "problem_label": PROBLEM_LABEL[problem_type],
         "company": company,
         "hotline": hotline,
-        "responsible_party": {"primary": primary, "reason": reason, "also": also},
+        "responsible_party": {
+            "primary": primary,
+            "reason": reason,
+            "also": also,
+            "risk_transferred": risk_transferred,
+            "burden_of_proof": burden,
+            "stance": stance,
+            "success_likelihood": likelihood,
+        },
         "delay_assessment": delay_note,
         "treat_as_lost": treat_as_lost,
         "compensation": {

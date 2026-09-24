@@ -155,14 +155,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 /* ---------- 窄屏适配 ----------
    原先这里是 .sidebar, .panel { display: none },等于手机上把任务进度、
    跟进计划、材料全砍掉,只剩中间对话 —— 而这三样恰恰是这个产品的核心。
-   改成:侧栏做成抽屉,任务面板和对话用底部标签切换。 */
+   改成:侧栏做成抽屉,任务面板和对话用底部标签切换。
+
+   注意:涉及 .sidebar / .main / .panel / .bubble 的响应式规则写在
+   各自组件的 scoped 块里。scoped 会加属性选择器,优先级高于这里,
+   写在这个文件里会被组件的基础样式压掉。这里只放非 scoped 的元素。 */
 
 .hamburger,
 .mobile-tabs,
 .drawer-mask { display: none; }
 
 @media (max-width: 1100px) {
-  /* 会话列表 → 从左侧滑出的抽屉 */
   .hamburger {
     display: block;
     font-size: 19px;
@@ -170,22 +173,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
     padding: 4px 8px;
     color: var(--text-dim);
     border-radius: var(--radius-sm);
+    flex: 0 0 auto;
   }
   .hamburger:hover { background: var(--bg-hover); color: var(--text); }
-
-  .sidebar {
-    position: fixed;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    z-index: 60;
-    width: 78vw;
-    max-width: 300px;
-    transform: translateX(-102%);
-    transition: transform .22s ease;
-    box-shadow: 2px 0 18px rgba(0, 0, 0, .3);
-  }
-  .sidebar.open { transform: translateX(0); }
 
   .drawer-mask {
     display: block;
@@ -194,17 +184,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
     z-index: 55;
     background: rgba(0, 0, 0, .45);
   }
-
-  /* 对话与任务面板二选一,底部标签切换 */
-  .main,
-  .panel {
-    width: 100%;
-    flex: 1 1 auto;
-    border-left: none;
-  }
-  .layout.view-chat .panel { display: none; }
-  .layout.view-task .main { display: none; }
-  .layout.view-task .panel { display: block; }
 
   .mobile-tabs {
     display: flex;
@@ -223,47 +202,14 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
     padding: 11px 0;
     font-size: 13px;
     color: var(--text-faint);
-    position: relative;
   }
   .mobile-tabs button.active { color: var(--accent); font-weight: 600; }
   .mobile-tabs button span { font-size: 15px; }
-  .mobile-tabs button em {
-    font-style: normal;
-    font-size: 11px;
-    opacity: .75;
-  }
+  .mobile-tabs button em { font-style: normal; font-size: 11px; opacity: .75; }
   .mobile-tabs button .dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--green);
   }
-
-  /* 顶栏在窄屏会挤成一团,让演示时钟那排能横向滚动 */
-  .topbar { gap: 10px; padding: 8px 12px; overflow-x: auto; }
-  /* 不加 nowrap 的话「快递管家」会被压成一列竖字 */
-  .brand { flex: 0 0 auto; }
-  .brand-name { white-space: nowrap; }
-  .brand-sub { display: none; }
-  .demo-bar { flex: 0 0 auto; }
-  .model-chip { flex: 0 0 auto; }
-
-  .scroll { padding: 16px; }
-  .composer { padding: 10px 16px 12px; }
-  .welcome h1 { font-size: 21px; }
-  .lede { font-size: 13px; }
-  .scen-grid { grid-template-columns: 1fr; }
-  .bubble, .body { max-width: 88% !important; }
-  .traces { margin-left: 0; }
-}
-
-/* 手机竖屏:进一步压缩 */
-@media (max-width: 560px) {
-  .brand-name { font-size: 14px; }
-  .logo { font-size: 18px; }
-  .demo-bar .btn { padding: 4px 8px; font-size: 12px; }
-  .clock { font-size: 11.5px; }
-  .scroll { padding: 12px; }
-  .avatar { flex-basis: 26px; width: 26px; height: 26px; }
-  .bubble, .body { max-width: 92% !important; }
 }

@@ -66,69 +66,86 @@ def material_to_dict(m: Material) -> dict:
 
 
 # 三类任务的步骤名各不相同,模型偶尔会把另一套的名字用过来。
-# 这里给常见的错配一个归宿,免得一个纯粹的命名问题打断整条流程。
+# 别名只收「明确指向某一步」的写法。像 done / complete / finish 这种
+# 泛化词绝对不能进表 —— 模型很可能用它表达"这步做完了",
+# 一旦被映射到最后一步 resolved,整个任务会被直接标成结案。
 STEP_ALIASES: dict[str, tuple[str, ...]] = {
-    "collect_info": ("collect", "collect_requirements", "gather", "info", "收集信息"),
-    "verify_tracking": ("tracking", "check_tracking", "query_tracking", "logistics", "核实物流"),
-    "assess": ("assessment", "evaluate", "judge", "responsibility", "评估", "责任判定"),
-    "prepare_materials": ("materials", "prepare", "draft", "准备材料"),
-    "submit": ("submit_claim", "file_claim", "apply_claim", "提交"),
-    "await_response": ("waiting", "await", "follow_up", "等待答复"),
-    "escalate": ("escalation", "complain", "升级"),
-    "resolved": ("done", "finish", "complete", "close", "结案", "完成"),
-    "check_eligibility": ("eligibility", "check", "判断资格", "资格"),
-    "cost_analysis": ("cost", "compare_shipping", "shipping_cost", "算成本", "成本"),
-    "apply": ("apply_return", "request", "申请"),
-    "ship_back": ("return_ship", "send_back", "寄回"),
-    "merchant_receive": ("receive", "merchant", "签收"),
-    "refund": ("refund_received", "money_back", "退款"),
-    "collect_requirements": ("requirements", "collect_info", "需求"),
-    "compare_plans": ("compare", "compare_shipping", "plans", "比价", "对比方案"),
-    "guide": ("instructions", "howto", "指引"),
-    "pitfalls": ("tips", "warnings", "避坑"),
-    "order_placed": ("ordered", "placed", "已下单"),
-    "delivered": ("signed", "received", "已签收"),
+    "collect_info": ("collectinfo", "gatherinfo", "收集信息"),
+    "verify_tracking": ("verifytracking", "checktracking", "querytracking", "query_tracking", "核实物流", "查物流"),
+    "assess": ("assessclaim", "assess_claim", "责任判定", "赔偿评估"),
+    "prepare_materials": ("preparematerials", "draftmaterials", "准备材料", "生成材料"),
+    "submit": ("submitclaim", "fileclaim", "提交索赔"),
+    "await_response": ("awaitresponse", "waitingresponse", "等待答复"),
+    "escalate": ("escalation", "升级投诉"),
+    "check_eligibility": ("checkeligibility", "checkreturneligibility", "check_return_eligibility", "判断退货资格", "退货资格"),
+    "cost_analysis": ("costanalysis", "算成本", "成本分析"),
+    "apply": ("applyreturn", "申请退货"),
+    "ship_back": ("shipback", "sendback", "寄回商品"),
+    "merchant_receive": ("merchantreceive", "商家签收"),
+    "refund": ("refundreceived", "退款到账"),
+    "collect_requirements": ("collectrequirements", "拆解需求"),
+    "compare_plans": ("compareplans", "compareshipping", "compare_shipping", "匹配方案", "对比方案"),
+    "guide": ("下单指引",),
+    "pitfalls": ("避坑提醒",),
+    "order_placed": ("orderplaced", "已下单"),
+    "delivered": ("已签收",),
 }
+
+# 模糊匹配的最短长度。太短的词(apply、guide)容易误伤,
+# 而误伤的代价是把中间步骤全部标成完成。
+MIN_FUZZY_LEN = 5
 
 
 def _normalize(text: str) -> str:
-    return "".join(ch for ch in (text or "").lower() if ch.isalnum() or "一" <= ch <= "鿿")
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
 
-def resolve_step(steps: list[dict], wanted: str, current_step: str | None) -> tuple[int | None, str | None]:
+def resolve_step(steps: list[dict], wanted: str, current_step: str | None) -> tuple[int | None, str | None, bool]:
     """把模型给的步骤名解析成实际下标。
 
-    模型面对的是三套不同的步骤命名,难免串台(比如给退货任务传了寄件的
-    compare_plans)。精确匹配失败就直接抛错的话,一个纯命名问题会在工具轨迹上
-    留下一串红叉。这里按 精确 → 标题 → 别名 → 模糊 的顺序找,
-    实在找不到才落到当前步骤,并把这件事写进返回值告诉模型。
+    返回 (下标, 说明, 是否匹配成功)。
 
-    返回 (下标, 说明)。说明非空时表示做了兜底,需要回给模型。
+    第三个返回值很重要:没匹配上时**不能**去改任何步骤的状态。
+    早先的版本在匹配失败后兜底到当前步骤并照常执行 step_status,
+    结果模型每传错一次名字,任务就无中生有地推进一格;
+    更糟的是别名表里有 done/complete,模型传个 done 就把整个任务标成结案。
+
+    匹配顺序:精确 key → 标题 → 别名 → 模糊(且必须唯一命中)。
     """
     if not steps:
-        return None, None
+        return None, None, False
     norm_wanted = _normalize(wanted)
 
     for i, s in enumerate(steps):
         if s["key"] == wanted:
-            return i, None
+            return i, None, True
     for i, s in enumerate(steps):
         if _normalize(s["key"]) == norm_wanted or _normalize(s.get("title", "")) == norm_wanted:
-            return i, f"步骤名 {wanted} 已按标题匹配到 {s['key']}"
+            return i, f"步骤名 {wanted} 已按标题匹配到 {s['key']}", True
     for i, s in enumerate(steps):
-        aliases = STEP_ALIASES.get(s["key"], ())
-        if wanted in aliases or norm_wanted in {_normalize(a) for a in aliases}:
-            return i, f"步骤名 {wanted} 已按别名匹配到 {s['key']}"
-    for i, s in enumerate(steps):
-        nk, nt = _normalize(s["key"]), _normalize(s.get("title", ""))
-        if norm_wanted and (norm_wanted in nk or nk in norm_wanted or norm_wanted in nt):
-            return i, f"步骤名 {wanted} 已模糊匹配到 {s['key']}"
+        if norm_wanted and norm_wanted in {_normalize(a) for a in STEP_ALIASES.get(s["key"], ())}:
+            return i, f"步骤名 {wanted} 已按别名匹配到 {s['key']}", True
 
-    idx = next((i for i, s in enumerate(steps) if s["key"] == current_step), 0)
-    return idx, (
-        f"这个任务没有名为 {wanted} 的步骤,已按当前步骤 {steps[idx]['key']} 处理。"
-        f"本任务的合法步骤是:{[s['key'] for s in steps]}"
-    )
+    # 模糊匹配:只认"给的名字是某个步骤的一部分"这一个方向。
+    # 反方向(步骤名是给的名字的一部分)会让 resolved_the_issue 命中 resolved,
+    # 从而跳到最后一步、把中间步骤全标成完成。
+    if len(norm_wanted) >= MIN_FUZZY_LEN:
+        hits = [
+            i for i, s in enumerate(steps)
+            if norm_wanted in _normalize(s["key"]) or norm_wanted in _normalize(s.get("title", ""))
+        ]
+        if len(hits) == 1:
+            return hits[0], f"步骤名 {wanted} 已模糊匹配到 {steps[hits[0]]['key']}", True
+        if len(hits) > 1:
+            return None, (
+                f"步骤名 {wanted} 同时像 {[steps[i]['key'] for i in hits]} 好几步,无法确定,"
+                f"本次没有改动任何步骤。请用准确的步骤名重试。"
+            ), False
+
+    return None, (
+        f"这个任务没有名为 {wanted} 的步骤,**本次没有改动任何步骤状态**。"
+        f"本任务的合法步骤是:{[s['key'] for s in steps]}。请用其中之一重试。"
+    ), False
 
 
 # ---------------- 任务 ----------------
@@ -180,10 +197,14 @@ def update_task(
     now_iso = clock.iso(clock.now())
 
     resolve_note: str | None = None
+    idx: int | None = None
+    matched = False
     if step_key:
-        idx, resolve_note = resolve_step(steps, step_key, task.current_step)
-        if idx is None:
-            raise ValueError(f"任务 {task_id} 没有步骤 {step_key},可用:{[s['key'] for s in steps]}")
+        idx, resolve_note, matched = resolve_step(steps, step_key, task.current_step)
+        # 认不出来就什么都不动,只把合法步骤名回给模型。
+        # 强行兜底到当前步骤会造成进度虚假推进,比不动危险得多。
+
+    if matched and idx is not None:
         if step_status:
             if step_status not in STEP_STATUSES:
                 raise ValueError(f"步骤状态只能是 {STEP_STATUSES}")
@@ -216,10 +237,12 @@ def update_task(
             steps[idx]["note"] = note
             steps[idx]["updated_at"] = now_iso
     elif note:
-        idx = next((i for i, s in enumerate(steps) if s["key"] == task.current_step), None)
-        if idx is not None:
-            steps[idx]["note"] = note
-            steps[idx]["updated_at"] = now_iso
+        # 没给步骤名、或者步骤名没认出来 —— 备注记在当前步骤上,
+        # 但绝不动任何步骤的状态
+        cur = next((i for i, s in enumerate(steps) if s["key"] == task.current_step), None)
+        if cur is not None:
+            steps[cur]["note"] = note
+            steps[cur]["updated_at"] = now_iso
 
     task.steps = steps
     if details:

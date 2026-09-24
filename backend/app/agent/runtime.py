@@ -89,6 +89,9 @@ def message_to_dict(m: Message) -> dict:
     }
 
 
+# 回放历史时用它代替跟进触发提示的原文,避免旧指令在后续每一轮反复生效
+FOLLOWUP_REPLAY_MARKER = "(系统在此处触发了一次主动跟进,下面是你当时的汇报)"
+
 INCOMPLETE_TOOL_RESULT = json.dumps(
     {"error": "该工具调用没有完成(用户中断了上一轮回答)。如果还需要这个结果,请重新调用一次。"},
     ensure_ascii=False,
@@ -172,6 +175,15 @@ def build_llm_history(session, conversation_id: str, limit: int = 60) -> list[di
     for m in rows:
         meta = m.meta or {}
         if m.role == "user":
+            if meta.get("is_followup_trigger"):
+                # 跟进触发提示是一次性的系统指令,原文很长而且开头就是
+                # 「现在是系统触发的主动跟进时刻,不是用户在说话」。
+                # 原样回放的话,之后每一轮普通对话都会读到这句,
+                # 跟进做过几次以后历史里堆着好几条,模型行为就飘了
+                # (测试报告 FT-08:「可能会受到上下文的影响」)。
+                # 回放时压成一行事实陈述,保留时间线但不再重复下指令。
+                history.append({"role": "user", "content": FOLLOWUP_REPLAY_MARKER})
+                continue
             history.append({"role": "user", "content": m.content})
         elif m.role == "assistant":
             entry: dict[str, Any] = {"role": "assistant", "content": m.content or ""}

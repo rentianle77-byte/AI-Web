@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.db import db_kind, init_db
+from app.events import bus
 from app.followup import scheduler
 from app.llm.factory import get_client
 from app.rag.index import index
@@ -75,6 +76,7 @@ def health():
         "database": db_kind(),
         "knowledge_chunks": len(index.chunks),
         "scheduler_running": scheduler.is_running(),
+        "events": bus.stats(),
     }
 
 

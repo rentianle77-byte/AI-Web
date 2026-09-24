@@ -158,3 +158,66 @@ def test_partial_damage_scales_claim():
     full = assess_claim("damaged", declared_value=1000, damage_ratio=1.0)["compensation"]["suggested_claim"]
     half = assess_claim("damaged", declared_value=1000, damage_ratio=0.5)["compensation"]["suggested_claim"]
     assert half < full
+
+
+# ---------------- GT-02:签收与风险转移 ----------------
+def test_unsigned_online_purchase_risk_on_merchant():
+    r = assess_claim("damaged", is_online_purchase=True, signed=False, declared_value=780)
+    rp = r["responsible_party"]
+    assert rp["risk_transferred"] is False
+    assert rp["burden_of_proof"] == "商家"
+    assert rp["success_likelihood"] == "高"
+
+
+def test_signed_then_opened_shifts_burden_to_recipient():
+    """测试报告 GT-02:签收后开箱破损,不能还当成"风险在商家"。
+
+    民法典 604 条规定交付后风险转移,512 条把网购件的交付时间定为签收时间。
+    但隐蔽破损在合理期限内仍可主张 —— 所以不是一刀切不能索赔,
+    而是举证责任翻转到收件人,胜算取决于证据。
+    """
+    r = assess_claim("damaged", is_online_purchase=True, signed=True, has_evidence=True, declared_value=780)
+    rp = r["responsible_party"]
+    assert rp["risk_transferred"] is True
+    assert rp["burden_of_proof"] == "收件人"
+    assert rp["stance"] == "conditional"
+    assert "证明破损发生在运输途中" in rp["primary"]
+    assert "604" in rp["reason"]
+
+
+def test_signed_self_shipped_also_shifts_burden():
+    """自寄件同样受签收影响 —— 改之前这条路径压根没考虑 signed。"""
+    r = assess_claim("damaged", is_online_purchase=False, signed=True, declared_value=500)
+    rp = r["responsible_party"]
+    assert rp["risk_transferred"] is True
+    assert rp["burden_of_proof"] == "收件人"
+    assert "快递公司" in rp["primary"]
+
+
+def test_visible_damage_signed_anyway_is_weakest():
+    """外包装当场就破损却签收了 —— 最不利的情形。"""
+    r = assess_claim("damaged", is_online_purchase=True, signed=True,
+                     damage_visible_at_signing=True, has_evidence=True, declared_value=780)
+    rp = r["responsible_party"]
+    assert rp["stance"] == "weak"
+    assert "不利" in rp["primary"]
+    assert "25 条" in rp["reason"] or "验视" in rp["also"]
+
+
+def test_no_evidence_after_signing_lowers_odds():
+    with_ev = assess_claim("damaged", is_online_purchase=True, signed=True, has_evidence=True)
+    without = assess_claim("damaged", is_online_purchase=True, signed=True, has_evidence=False)
+    assert with_ev["responsible_party"]["success_likelihood"] == "中等"
+    assert "低" in without["responsible_party"]["success_likelihood"]
+
+
+def test_risk_transfer_appears_in_risks_list():
+    r = assess_claim("damaged", is_online_purchase=True, signed=True, declared_value=780)
+    assert any("风险已依民法典第 604 条转移" in x for x in r["risks"])
+
+
+def test_compensation_unaffected_by_signing():
+    """签收影响的是责任归属和举证,不影响赔偿金额的算法。"""
+    a = assess_claim("damaged", company="中通", declared_value=780, shipping_fee=12, signed=False)
+    b = assess_claim("damaged", company="中通", declared_value=780, shipping_fee=12, signed=True)
+    assert a["compensation"]["suggested_claim"] == b["compensation"]["suggested_claim"]

@@ -133,6 +133,18 @@ async function cancel(f) {
   width: 340px; flex: 0 0 340px; border-left: 1px solid var(--border);
   background: var(--bg-soft); overflow-y: auto; padding: 16px;
 }
+
+/* 窄屏下面板要占满宽度。这条必须写在组件的 scoped 块里 ——
+   scoped 样式会带上属性选择器,优先级高于全局 CSS 的媒体查询,
+   写在 main.css 里会被上面那条 340px 压掉。 */
+@media (max-width: 1100px) {
+  .panel {
+    width: 100%;
+    flex: 1 1 auto;
+    border-left: none;
+    padding-bottom: 24px;
+  }
+}
 .empty { text-align: center; padding: 60px 20px; color: var(--text-faint); }
 .empty-icon { font-size: 34px; margin-bottom: 10px; }
 .empty p { color: var(--text-dim); margin: 6px 0; font-weight: 500; }

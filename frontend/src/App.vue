@@ -496,4 +496,62 @@ async function refreshTaskPanel() {
 .composer textarea { resize: none; line-height: 1.6; }
 .composer-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .hint { font-size: 11.5px; color: var(--text-faint); margin-right: auto; }
+
+/* ---------- 窄屏 ----------
+   这些规则必须写在组件的 scoped 块里:scoped 会给选择器加属性限定,
+   优先级高于 main.css 的全局媒体查询,写在外面会被上面的基础样式压掉。 */
+@media (max-width: 1100px) {
+  /* 纵向排布,让「任务」视图里面板在上、输入框在下 */
+  .layout { flex-direction: column; }
+
+  /* 会话列表 → 左侧滑出的抽屉 */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    width: 78vw;
+    max-width: 300px;
+    flex: none;
+    transform: translateX(-102%);
+    transition: transform .22s ease;
+    box-shadow: 2px 0 18px rgba(0, 0, 0, .3);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .main { width: 100%; }
+
+  /* 切到「任务」时只收起消息流,输入框保留 ——
+     把整个 .main 隐藏会连输入框、停止按钮和错误提示一起藏掉 */
+  .layout.view-chat .panel { display: none; }
+  .layout.view-task .scroll { display: none; }
+  .layout.view-task .main { flex: 0 0 auto; order: 2; }
+  .layout.view-task .panel { order: 1; }
+
+  .scroll { padding: 16px; }
+  .composer { padding: 10px 16px 12px; }
+  .welcome h1 { font-size: 21px; }
+  .lede { font-size: 13px; }
+  .scen-grid { grid-template-columns: 1fr; }
+  .traces { margin-left: 0; }
+  .bubble { max-width: 86%; }
+
+  /* 顶栏会挤成一团,让它能横向滚动;品牌名不加 nowrap 会被压成一列竖字 */
+  .topbar { gap: 10px; padding: 8px 12px; overflow-x: auto; }
+  .brand { flex: 0 0 auto; }
+  .brand-name { white-space: nowrap; }
+  .brand-sub { display: none; }
+  .demo-bar, .model-chip { flex: 0 0 auto; }
+}
+
+@media (max-width: 560px) {
+  .brand-name { font-size: 14px; }
+  .logo { font-size: 18px; }
+  .demo-bar .btn { padding: 4px 8px; font-size: 12px; }
+  .clock { font-size: 11.5px; }
+  .scroll { padding: 12px; }
+  .avatar { flex-basis: 26px; width: 26px; height: 26px; }
+  .bubble { max-width: 92%; }
+}
 </style>

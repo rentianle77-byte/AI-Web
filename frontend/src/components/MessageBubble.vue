@@ -47,6 +47,12 @@ function escapeHtml(s) {
 .av-user { background: var(--bg-hover); color: var(--text-dim); }
 .av-bell { background: rgba(167,139,250,.2); }
 .body { min-width: 0; max-width: 78%; }
+/* 窄屏放宽。只放宽外层 .body,不要连 .bubble 一起限宽 ——
+   两层都设百分比会相乘,反而比桌面还窄 */
+@media (max-width: 1100px) {
+  .body { max-width: 86%; }
+  .bubble { max-width: none; }
+}
 .row.user .body { display: flex; flex-direction: column; align-items: flex-end; }
 .bubble {
   background: var(--bg-card); border: 1px solid var(--border);
