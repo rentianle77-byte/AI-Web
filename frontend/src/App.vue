@@ -108,8 +108,12 @@ function newConversation() {
 
 async function openConversation(id, silent = false) {
   if (!id) return
-  sidebarOpen.value = false
-  if (!silent) mobileView.value = 'chat'
+  // silent=true 是后台刷新用的(跟进触发、时钟快进、面板刷新)。
+  // 这种情况下不能动用户正在操作的界面 —— 否则手机上抽屉会在手指底下自己收起
+  if (!silent) {
+    sidebarOpen.value = false
+    mobileView.value = 'chat'
+  }
   try {
     const data = await api.getConversation(id)
     conversationId.value = id

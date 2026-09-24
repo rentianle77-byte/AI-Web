@@ -274,3 +274,17 @@ def test_event_bus_stats_exposed():
     st = bus.stats()
     assert set(st) == {"subscribers", "dropped", "queue_size"}
     assert st["dropped"] == 0
+
+
+def test_repetition_hint_survives_truncation():
+    """提示必须放在 JSON 最前面。
+
+    _truncate 从尾部截断,提示挂在末尾的话,结果一长就第一个被切掉 ——
+    而结果越长越是模型该收手的时候,守卫等于在最需要时失效。
+    """
+    from app.agent.runtime import MAX_SAME_TOOL_CALLS, _guard_repetition, _truncate
+
+    big = json.dumps({"quotes": [{"x": "填充" * 60} for _ in range(80)]}, ensure_ascii=False)
+    out = _truncate(_guard_repetition("compare_shipping", ["compare_shipping"] * MAX_SAME_TOOL_CALLS, big))
+    assert "不要再用同义词重复检索" in out
+    assert out.index("_system_hint") < 50, "提示应该在最前面"

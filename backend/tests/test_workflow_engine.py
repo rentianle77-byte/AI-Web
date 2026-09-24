@@ -59,19 +59,29 @@ def test_finishing_last_step_completes_task(session):
     assert service.task_to_dict(t)["progress"] == 100
 
 
-def test_wrong_workflow_step_key_falls_back(session):
-    """模型把寄件任务的步骤名用到索赔任务上时,不该打断流程。
+def test_wrong_workflow_step_key_changes_nothing(session):
+    """模型把寄件任务的步骤名用到索赔任务上时:不打断流程,但也绝不乱改状态。
 
     三类任务的步骤命名各不相同,模型偶尔串台。以前这里直接抛错,
-    工具轨迹上就会留下红叉(测试报告 FT-02 观察到连续 3 次失败)。
-    现在改为兜底到当前步骤,并把合法步骤名回给模型。
+    工具轨迹上会留下红叉(测试报告 FT-02 观察到连续 3 次失败)。
+
+    中间版本改成了"兜底到当前步骤并照常执行状态变更",结果更糟 ——
+    模型每传错一次名字任务就凭空推进一格。现在是:认不出来就什么都不动,
+    只把合法步骤名回给模型重试。
     """
     t = make_task(session, "claim")
+    before = service.task_to_dict(t)
     updated = service.update_task(session, t.id, step_key="compare_plans", step_status="done", note="记一笔")
+    after = service.task_to_dict(updated)
+
     note = getattr(updated, "_resolve_note", None)
     assert note and "compare_plans" in note
-    assert "collect_info" in note  # 提示里要带上合法步骤名
-    assert updated.status != "cancelled"
+    assert "collect_info" in note, "提示里要带上合法步骤名"
+
+    assert after["progress"] == before["progress"], "认不出步骤名时进度不能变"
+    assert after["status"] == before["status"]
+    assert after["current_step"] == before["current_step"]
+    assert [s["status"] for s in after["steps"]] == [s["status"] for s in before["steps"]]
 
 
 def test_step_key_matched_by_title(session):
@@ -182,3 +192,35 @@ def test_task_summary_for_prompt_is_readable(session):
     service.schedule_followup_in(session, t.id, None, 72, "问进展")
     text = service.task_summary_for_prompt(session, t)
     assert "当前步骤" in text and "信息齐了" in text and "跟进计划" in text
+
+
+def test_alias_match_writes_real_key_to_current_step(session):
+    """别名匹配后 current_step 必须是真实的步骤 key,不能是模型传的原文。
+
+    写成原文会让 current_step 变成 steps 里不存在的值:
+    前端当前步骤高亮丢失,之后只带 note 的调用也会因为找不到当前步骤
+    而把备注静默丢掉。
+    """
+    t = make_task(session, "claim")
+    t = service.update_task(session, t.id, step_key="核实物流", step_status="in_progress")
+    assert t.current_step == "verify_tracking"
+    assert any(s["key"] == t.current_step for s in t.steps), "current_step 必须在 steps 里存在"
+    assert service.task_to_dict(t)["current_step_title"] is not None
+
+
+def test_note_still_lands_after_alias_match(session):
+    """接上一条:current_step 没被污染,后续只带 note 的调用才能正确落位。"""
+    t = make_task(session, "claim")
+    t = service.update_task(session, t.id, step_key="查物流", step_status="in_progress")
+    t = service.update_task(session, t.id, note="轨迹已核实")
+    notes = [s.get("note") for s in t.steps if s.get("note")]
+    assert "轨迹已核实" in notes
+
+
+def test_state_machine_stays_consistent_after_bad_key(session):
+    """污染 current_step 后再传错名字,曾导致两个步骤同时 in_progress。"""
+    t = make_task(session, "claim")
+    t = service.update_task(session, t.id, step_key="核实物流", step_status="in_progress")
+    t = service.update_task(session, t.id, step_key="不存在的步骤", step_status="done")
+    running = [s["key"] for s in t.steps if s["status"] == "in_progress"]
+    assert len(running) == 1, f"同时处于进行中的步骤不止一个:{running}"
