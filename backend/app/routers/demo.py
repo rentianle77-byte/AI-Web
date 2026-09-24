@@ -35,6 +35,7 @@ def status():
         "clock": {"now": clock.fmt_local(clock.now()), "offset_hours": round(clock.get_offset() / 3600, 2)},
         "scheduler": {"running": scheduler.is_running(), "interval_seconds": settings.followup_interval, "pending_followups": pending},
         "tasks": {"active": active},
+        "events": bus.stats(),
     }
 
 
