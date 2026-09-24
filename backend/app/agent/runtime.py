@@ -304,13 +304,15 @@ async def run_turn(
                     display = tools_mod.tool_display_name(call.name)
                     yield {"type": "tool_start", "id": call.id, "name": call.name, "display": display, "arguments": call.arguments}
                     result_json, is_error = tools_mod.execute(call.name, ctx, call.arguments)
-                    result_json = _guard_repetition(call.name, recent_tools, result_json)
+                    # 收敛提示只在本轮喂给模型,不落库 —— 它带着"你已经调用 N 次"
+                    # 这种一次性信息,存进去下一轮回放时就成了误导
+                    hinted = _guard_repetition(call.name, recent_tools, result_json)
                     session.commit()
 
                     tool_msg = add_message(session, conv.id, "tool", _truncate(result_json), {"tool_call_id": call.id, "name": call.name, "display": display, "is_error": is_error, "arguments": call.arguments})
                     session.commit()
                     pending_calls.pop(call.id, None)
-                    history.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": _truncate(result_json), "is_error": is_error})
+                    history.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": _truncate(hinted), "is_error": is_error})
                     recent_tools.append(call.name)
 
                     try:

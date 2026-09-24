@@ -186,3 +186,21 @@ def test_repetition_guard_keeps_original_fields():
     recent = ["search_knowledge"] * 4
     data = json.loads(_guard_repetition("search_knowledge", recent, '{"hits":[1,2],"query":"x"}'))
     assert data["hits"] == [1, 2] and data["query"] == "x"
+
+
+def test_repetition_hint_not_persisted():
+    """收敛提示带"你已经调用 N 次"这种一次性信息,不该落库。
+
+    落库的话,下一轮回放时模型会看到一条过期的提示,反而被误导。
+    正确做法:数据库存原始工具结果,提示只加在本轮发给模型的历史里。
+    """
+    import inspect
+    from app.agent import runtime
+
+    src = inspect.getsource(runtime.run_turn)
+    persist = [l for l in src.splitlines() if 'add_message(session, conv.id, "tool"' in l]
+    assert persist, "没找到工具结果落库那一行"
+    assert "hinted" not in persist[0], "落库用的应该是原始结果,不是加了提示的版本"
+
+    to_model = [l for l in src.splitlines() if 'history.append({"role": "tool"' in l]
+    assert to_model and "hinted" in to_model[0], "发给模型的历史应该用加了提示的版本"
