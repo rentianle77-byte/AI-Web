@@ -59,10 +59,40 @@ def test_finishing_last_step_completes_task(session):
     assert service.task_to_dict(t)["progress"] == 100
 
 
-def test_unknown_step_key_rejected(session):
-    t = make_task(session)
-    with pytest.raises(ValueError, match="没有步骤"):
-        service.update_task(session, t.id, step_key="compare_plans", step_status="done")
+def test_wrong_workflow_step_key_falls_back(session):
+    """模型把寄件任务的步骤名用到索赔任务上时,不该打断流程。
+
+    三类任务的步骤命名各不相同,模型偶尔串台。以前这里直接抛错,
+    工具轨迹上就会留下红叉(测试报告 FT-02 观察到连续 3 次失败)。
+    现在改为兜底到当前步骤,并把合法步骤名回给模型。
+    """
+    t = make_task(session, "claim")
+    updated = service.update_task(session, t.id, step_key="compare_plans", step_status="done", note="记一笔")
+    note = getattr(updated, "_resolve_note", None)
+    assert note and "compare_plans" in note
+    assert "collect_info" in note  # 提示里要带上合法步骤名
+    assert updated.status != "cancelled"
+
+
+def test_step_key_matched_by_title(session):
+    t = make_task(session, "claim")
+    updated = service.update_task(session, t.id, step_key="核实物流", step_status="done")
+    idx = next(i for i, s in enumerate(updated.steps) if s["key"] == "verify_tracking")
+    assert updated.steps[idx]["status"] == "done"
+
+
+def test_step_key_matched_by_alias(session):
+    """模型传 query_tracking(工具名)而不是 verify_tracking(步骤名)也认。"""
+    t = make_task(session, "claim")
+    updated = service.update_task(session, t.id, step_key="query_tracking", step_status="done")
+    idx = next(i for i, s in enumerate(updated.steps) if s["key"] == "verify_tracking")
+    assert updated.steps[idx]["status"] == "done"
+
+
+def test_exact_step_key_has_no_note(session):
+    t = make_task(session, "claim")
+    updated = service.update_task(session, t.id, step_key="collect_info", step_status="done")
+    assert getattr(updated, "_resolve_note", None) is None
 
 
 def test_details_merge_not_replace(session):

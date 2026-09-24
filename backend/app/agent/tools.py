@@ -223,7 +223,13 @@ def _update_task(ctx: ToolContext, args: dict) -> Any:
         status=args.get("status"),
     )
     ctx.task = updated
-    return service.task_to_dict(updated)
+    result = service.task_to_dict(updated)
+    note = getattr(updated, "_resolve_note", None)
+    if note:
+        # 步骤名对不上时做了兜底,把这件事告诉模型,让它下次用对名字
+        result["_note"] = note
+        result["合法步骤"] = [s["key"] for s in updated.steps or []]
+    return result
 
 
 # ============================= 主动跟进 =============================

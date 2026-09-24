@@ -20,6 +20,9 @@ const status = ref(null)
 const clock = ref(null)
 
 const input = ref('')
+// 窄屏下三栏放不下,用底部标签在「对话」和「任务」之间切,侧栏做成抽屉
+const mobileView = ref('chat')
+const sidebarOpen = ref(false)
 const sending = ref(false)
 const errorMsg = ref('')
 const previewMaterial = ref(null)
@@ -99,10 +102,14 @@ function resetView() {
 function newConversation() {
   resetView()
   input.value = ''
+  sidebarOpen.value = false
+  mobileView.value = 'chat'
 }
 
 async function openConversation(id, silent = false) {
   if (!id) return
+  sidebarOpen.value = false
+  if (!silent) mobileView.value = 'chat'
   try {
     const data = await api.getConversation(id)
     conversationId.value = id
@@ -251,6 +258,7 @@ async function refreshTaskPanel() {
   <div class="app">
     <!-- 顶栏 -->
     <header class="topbar">
+      <button class="hamburger" title="会话列表" @click="sidebarOpen = !sidebarOpen">☰</button>
       <div class="brand">
         <span class="logo">📦</span>
         <div>
@@ -277,9 +285,11 @@ async function refreshTaskPanel() {
       </div>
     </header>
 
-    <div class="layout">
+    <div class="layout" :class="'view-' + mobileView">
+
+      <div v-if="sidebarOpen" class="drawer-mask" @click="sidebarOpen = false" />
       <!-- 左:会话列表 -->
-      <aside class="sidebar">
+      <aside class="sidebar" :class="{ open: sidebarOpen }">
         <button class="btn btn-primary new-btn" @click="newConversation">+ 新建对话</button>
         <div class="conv-list">
           <div
@@ -372,6 +382,17 @@ async function refreshTaskPanel() {
         @refresh="refreshTaskPanel"
       />
     </div>
+
+    <nav class="mobile-tabs">
+      <button :class="{ active: mobileView === 'chat' }" @click="mobileView = 'chat'">
+        <span>💬</span> 对话
+      </button>
+      <button :class="{ active: mobileView === 'task' }" @click="mobileView = 'task'">
+        <span>📋</span> 任务
+        <em v-if="task">{{ task.progress }}%</em>
+        <i v-if="materials.length" class="dot" />
+      </button>
+    </nav>
 
     <MaterialModal v-if="previewMaterial" :material="previewMaterial" @close="previewMaterial = null" />
   </div>

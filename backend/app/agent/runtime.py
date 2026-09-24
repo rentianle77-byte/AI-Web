@@ -35,6 +35,36 @@ def _truncate(text: str) -> str:
     return text[:MAX_TOOL_RESULT_CHARS] + f"\n...(结果过长,已截断,原长度 {len(text)} 字符)"
 
 
+# 同一个工具在一轮对话里连调多少次就该收手
+MAX_SAME_TOOL_CALLS = 3
+
+
+def _guard_repetition(tool_name: str, recent: list[str], result_json: str) -> str:
+    """同一工具反复调用时,在结果里明说"别再查了",避免模型空转。
+
+    真实现象:知识库检索落空时,模型会连查七八次,关键词越退化越短
+    (「保价」「破损」「赔偿」「快递」),白白耗掉十几秒和大量 token。
+    模型看不到自己调了几次,所以得由我们把这个事实塞回给它。
+    """
+    used = recent.count(tool_name)
+    if used < MAX_SAME_TOOL_CALLS:
+        return result_json
+    hint = (
+        f"【系统提示】本轮你已经调用 {tool_name} {used + 1} 次了。"
+        "不要再用同义词重复检索 —— 换关键词通常也不会有新结果。"
+        "请基于已拿到的信息作答;确实缺内容就如实告诉用户这一点不确定,"
+        "或者换一个不同的工具。"
+    )
+    try:
+        data = json.loads(result_json)
+        if isinstance(data, dict):
+            data["_system_hint"] = hint
+            return json.dumps(data, ensure_ascii=False, default=str)
+    except json.JSONDecodeError:
+        pass
+    return json.dumps({"result": result_json, "_system_hint": hint}, ensure_ascii=False)
+
+
 def _next_seq(session, conversation_id: str) -> int:
     current = session.scalar(select(func.max(Message.seq)).where(Message.conversation_id == conversation_id))
     return (current or 0) + 1
@@ -59,6 +89,78 @@ def message_to_dict(m: Message) -> dict:
     }
 
 
+INCOMPLETE_TOOL_RESULT = json.dumps(
+    {"error": "该工具调用没有完成(用户中断了上一轮回答)。如果还需要这个结果,请重新调用一次。"},
+    ensure_ascii=False,
+)
+
+
+def repair_tool_pairing(history: list[dict]) -> list[dict]:
+    """修补历史里配不上对的工具调用,防止整个会话永久性 400。
+
+    模型协议要求每个 tool_call 后面**紧跟**它的 tool_result,少一个都会被拒绝。
+    但用户点「停止」、刷新页面或关掉标签页时,后端可能已经把"模型要调工具"
+    存进了数据库,工具结果却还没写就断了连接。这条残缺记录会被之后每一轮
+    回放给模型,导致这个会话从此每发一句话都报 400,再也用不了。
+
+    这里做两件事:
+      1. 工具调用缺结果 → 补一条说明未完成的结果
+      2. 结果找不到对应的调用 → 丢掉
+
+    放在读取侧而不是写入侧,这样线上已经坏掉的会话也能自动恢复。
+    """
+    fixed: list[dict] = []
+    for entry in history:
+        if entry["role"] == "tool":
+            # 必须紧跟在带 tool_calls 的 assistant 之后,或跟在别的 tool 结果之后
+            prev = fixed[-1] if fixed else None
+            if prev is None or prev["role"] not in ("assistant", "tool"):
+                continue
+            anchor = next((e for e in reversed(fixed) if e["role"] == "assistant"), None)
+            known = {c.get("id") for c in (anchor or {}).get("tool_calls", [])}
+            if entry.get("tool_call_id") not in known:
+                continue  # 孤立结果,丢弃
+            fixed.append(entry)
+            continue
+
+        # 轮到新消息了,先把上一组工具调用缺的结果补齐
+        if fixed:
+            anchor = next((e for e in reversed(fixed) if e["role"] == "assistant"), None)
+            if anchor is not None and anchor.get("tool_calls"):
+                anchor_idx = len(fixed) - 1 - next(i for i, e in enumerate(reversed(fixed)) if e["role"] == "assistant")
+                answered = {e.get("tool_call_id") for e in fixed[anchor_idx + 1 :] if e["role"] == "tool"}
+                for call in anchor["tool_calls"]:
+                    if call.get("id") and call["id"] not in answered:
+                        fixed.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call["id"],
+                                "name": call.get("name", ""),
+                                "content": INCOMPLETE_TOOL_RESULT,
+                                "is_error": True,
+                            }
+                        )
+        fixed.append(entry)
+
+    # 历史不能以"只调工具没结果"收尾
+    anchor = next((e for e in reversed(fixed) if e["role"] == "assistant"), None)
+    if anchor is not None and anchor.get("tool_calls"):
+        anchor_idx = len(fixed) - 1 - next(i for i, e in enumerate(reversed(fixed)) if e["role"] == "assistant")
+        answered = {e.get("tool_call_id") for e in fixed[anchor_idx + 1 :] if e["role"] == "tool"}
+        for call in anchor["tool_calls"]:
+            if call.get("id") and call["id"] not in answered:
+                fixed.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call.get("name", ""),
+                        "content": INCOMPLETE_TOOL_RESULT,
+                        "is_error": True,
+                    }
+                )
+    return fixed
+
+
 def build_llm_history(session, conversation_id: str, limit: int = 60) -> list[dict]:
     """把数据库里的消息还原成 LLM 需要的格式(含 tool_call / tool_result 配对)。"""
     rows = list(
@@ -78,7 +180,9 @@ def build_llm_history(session, conversation_id: str, limit: int = 60) -> list[di
             history.append(entry)
         elif m.role == "tool":
             history.append({"role": "tool", "tool_call_id": meta.get("tool_call_id", ""), "name": meta.get("name", ""), "content": m.content, "is_error": meta.get("is_error", False)})
-    # 首条必须是 user
+
+    # 截断窗口可能把某轮的工具结果切掉一半,修补后再丢掉开头非 user 的消息
+    history = repair_tool_pairing(history)
     while history and history[0]["role"] != "user":
         history.pop(0)
     return history
@@ -138,6 +242,9 @@ async def run_turn(
         history = build_llm_history(session, conv.id)
         session.commit()
 
+        # 记录本轮已调过的工具,用于发现"同一个工具反复查、关键词越查越短"的空转
+        recent_tools: list[str] = []
+
         for iteration in range(settings.max_tool_iterations):
             # 每轮都用最新任务状态重建系统提示词,让模型始终知道自己走到哪了
             task_summary = service.task_summary_for_prompt(session, ctx.task) if ctx.task else None
@@ -188,30 +295,53 @@ async def run_turn(
                 break
 
             # ---- 执行工具 ----
-            for call in calls:
-                display = tools_mod.tool_display_name(call.name)
-                yield {"type": "tool_start", "id": call.id, "name": call.name, "display": display, "arguments": call.arguments}
-                result_json, is_error = tools_mod.execute(call.name, ctx, call.arguments)
-                session.commit()
+            # 客户端随时可能断开(点停止、刷页面),一旦在工具执行中途断掉,
+            # 数据库里就会留下"有调用没结果"的残缺记录。这里先记下本轮待办,
+            # 在 finally 里兜底补齐,读取侧的 repair_tool_pairing 是第二道防线。
+            pending_calls = {c.id: c for c in calls}
+            try:
+                for call in calls:
+                    display = tools_mod.tool_display_name(call.name)
+                    yield {"type": "tool_start", "id": call.id, "name": call.name, "display": display, "arguments": call.arguments}
+                    result_json, is_error = tools_mod.execute(call.name, ctx, call.arguments)
+                    # 收敛提示只在本轮喂给模型,不落库 —— 它带着"你已经调用 N 次"
+                    # 这种一次性信息,存进去下一轮回放时就成了误导
+                    hinted = _guard_repetition(call.name, recent_tools, result_json)
+                    session.commit()
 
-                tool_msg = add_message(session, conv.id, "tool", _truncate(result_json), {"tool_call_id": call.id, "name": call.name, "display": display, "is_error": is_error, "arguments": call.arguments})
-                session.commit()
-                history.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": _truncate(result_json), "is_error": is_error})
+                    tool_msg = add_message(session, conv.id, "tool", _truncate(result_json), {"tool_call_id": call.id, "name": call.name, "display": display, "is_error": is_error, "arguments": call.arguments})
+                    session.commit()
+                    pending_calls.pop(call.id, None)
+                    history.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": _truncate(hinted), "is_error": is_error})
+                    recent_tools.append(call.name)
 
-                try:
-                    parsed = json.loads(result_json)
-                except json.JSONDecodeError:
-                    parsed = {"raw": result_json[:500]}
-                yield {"type": "tool_end", "id": call.id, "name": call.name, "display": display, "is_error": is_error, "result": parsed, "message": message_to_dict(tool_msg)}
+                    try:
+                        parsed = json.loads(result_json)
+                    except json.JSONDecodeError:
+                        parsed = {"raw": result_json[:500]}
+                    yield {"type": "tool_end", "id": call.id, "name": call.name, "display": display, "is_error": is_error, "result": parsed, "message": message_to_dict(tool_msg)}
 
-                # 工具改了业务状态,单独推一条让前端面板刷新
-                if call.name in ("create_task", "update_task"):
-                    if ctx.task:
-                        yield {"type": "task_update", "task": service.task_to_dict(ctx.task)}
-                elif call.name == "save_material" and isinstance(parsed, dict) and parsed.get("id"):
-                    yield {"type": "material", "material": parsed}
-                elif call.name in ("schedule_followup", "cancel_followups") and ctx.task:
-                    yield {"type": "followup", "followups": [service.followup_to_dict(f) for f in service.list_followups(session, task_id=ctx.task.id)]}
+                    # 工具改了业务状态,单独推一条让前端面板刷新
+                    if call.name in ("create_task", "update_task"):
+                        if ctx.task:
+                            yield {"type": "task_update", "task": service.task_to_dict(ctx.task)}
+                    elif call.name == "save_material" and isinstance(parsed, dict) and parsed.get("id"):
+                        yield {"type": "material", "material": parsed}
+                    elif call.name in ("schedule_followup", "cancel_followups") and ctx.task:
+                        yield {"type": "followup", "followups": [service.followup_to_dict(f) for f in service.list_followups(session, task_id=ctx.task.id)]}
+            finally:
+                # 中途断开时把没跑完的工具补一条结果,不让残缺记录留在库里
+                if pending_calls:
+                    try:
+                        for cid, call in pending_calls.items():
+                            add_message(
+                                session, conv.id, "tool", INCOMPLETE_TOOL_RESULT,
+                                {"tool_call_id": cid, "name": call.name, "display": tools_mod.tool_display_name(call.name), "is_error": True, "interrupted": True},
+                            )
+                        session.commit()
+                        log.info("对话 %s 有 %d 个工具调用被中断,已补占位结果", conv.id, len(pending_calls))
+                    except Exception:  # noqa: BLE001
+                        log.exception("补占位工具结果失败")
         else:
             yield {"type": "error", "message": f"工具调用超过 {settings.max_tool_iterations} 轮仍未收敛,已停止。"}
 

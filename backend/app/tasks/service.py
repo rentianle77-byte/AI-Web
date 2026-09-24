@@ -65,6 +65,72 @@ def material_to_dict(m: Material) -> dict:
     }
 
 
+# 三类任务的步骤名各不相同,模型偶尔会把另一套的名字用过来。
+# 这里给常见的错配一个归宿,免得一个纯粹的命名问题打断整条流程。
+STEP_ALIASES: dict[str, tuple[str, ...]] = {
+    "collect_info": ("collect", "collect_requirements", "gather", "info", "收集信息"),
+    "verify_tracking": ("tracking", "check_tracking", "query_tracking", "logistics", "核实物流"),
+    "assess": ("assessment", "evaluate", "judge", "responsibility", "评估", "责任判定"),
+    "prepare_materials": ("materials", "prepare", "draft", "准备材料"),
+    "submit": ("submit_claim", "file_claim", "apply_claim", "提交"),
+    "await_response": ("waiting", "await", "follow_up", "等待答复"),
+    "escalate": ("escalation", "complain", "升级"),
+    "resolved": ("done", "finish", "complete", "close", "结案", "完成"),
+    "check_eligibility": ("eligibility", "check", "判断资格", "资格"),
+    "cost_analysis": ("cost", "compare_shipping", "shipping_cost", "算成本", "成本"),
+    "apply": ("apply_return", "request", "申请"),
+    "ship_back": ("return_ship", "send_back", "寄回"),
+    "merchant_receive": ("receive", "merchant", "签收"),
+    "refund": ("refund_received", "money_back", "退款"),
+    "collect_requirements": ("requirements", "collect_info", "需求"),
+    "compare_plans": ("compare", "compare_shipping", "plans", "比价", "对比方案"),
+    "guide": ("instructions", "howto", "指引"),
+    "pitfalls": ("tips", "warnings", "避坑"),
+    "order_placed": ("ordered", "placed", "已下单"),
+    "delivered": ("signed", "received", "已签收"),
+}
+
+
+def _normalize(text: str) -> str:
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum() or "一" <= ch <= "鿿")
+
+
+def resolve_step(steps: list[dict], wanted: str, current_step: str | None) -> tuple[int | None, str | None]:
+    """把模型给的步骤名解析成实际下标。
+
+    模型面对的是三套不同的步骤命名,难免串台(比如给退货任务传了寄件的
+    compare_plans)。精确匹配失败就直接抛错的话,一个纯命名问题会在工具轨迹上
+    留下一串红叉。这里按 精确 → 标题 → 别名 → 模糊 的顺序找,
+    实在找不到才落到当前步骤,并把这件事写进返回值告诉模型。
+
+    返回 (下标, 说明)。说明非空时表示做了兜底,需要回给模型。
+    """
+    if not steps:
+        return None, None
+    norm_wanted = _normalize(wanted)
+
+    for i, s in enumerate(steps):
+        if s["key"] == wanted:
+            return i, None
+    for i, s in enumerate(steps):
+        if _normalize(s["key"]) == norm_wanted or _normalize(s.get("title", "")) == norm_wanted:
+            return i, f"步骤名 {wanted} 已按标题匹配到 {s['key']}"
+    for i, s in enumerate(steps):
+        aliases = STEP_ALIASES.get(s["key"], ())
+        if wanted in aliases or norm_wanted in {_normalize(a) for a in aliases}:
+            return i, f"步骤名 {wanted} 已按别名匹配到 {s['key']}"
+    for i, s in enumerate(steps):
+        nk, nt = _normalize(s["key"]), _normalize(s.get("title", ""))
+        if norm_wanted and (norm_wanted in nk or nk in norm_wanted or norm_wanted in nt):
+            return i, f"步骤名 {wanted} 已模糊匹配到 {s['key']}"
+
+    idx = next((i for i, s in enumerate(steps) if s["key"] == current_step), 0)
+    return idx, (
+        f"这个任务没有名为 {wanted} 的步骤,已按当前步骤 {steps[idx]['key']} 处理。"
+        f"本任务的合法步骤是:{[s['key'] for s in steps]}"
+    )
+
+
 # ---------------- 任务 ----------------
 def create_task(session: Session, task_type: str, title: str, details: dict | None, conversation_id: str | None) -> Task:
     if task_type not in TASK_TYPES:
@@ -113,8 +179,9 @@ def update_task(
     steps = [dict(s) for s in (task.steps or [])]
     now_iso = clock.iso(clock.now())
 
+    resolve_note: str | None = None
     if step_key:
-        idx = next((i for i, s in enumerate(steps) if s["key"] == step_key), None)
+        idx, resolve_note = resolve_step(steps, step_key, task.current_step)
         if idx is None:
             raise ValueError(f"任务 {task_id} 没有步骤 {step_key},可用:{[s['key'] for s in steps]}")
         if step_status:
@@ -175,6 +242,8 @@ def update_task(
     task.updated_at = clock.now()
     session.flush()
     bus.publish({"type": "task_update", "task": task_to_dict(task)})
+    # 做过兜底匹配时挂在对象上,由工具层带回给模型,让它下次用对名字
+    task._resolve_note = resolve_note  # type: ignore[attr-defined]
     return task
 
 
