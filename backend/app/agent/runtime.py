@@ -58,11 +58,13 @@ def _guard_repetition(tool_name: str, recent: list[str], result_json: str) -> st
     try:
         data = json.loads(result_json)
         if isinstance(data, dict):
-            data["_system_hint"] = hint
-            return json.dumps(data, ensure_ascii=False, default=str)
+            # 提示放在最前面。_truncate 是从尾部截断的,挂在末尾的话
+            # 结果一长(compare_shipping 实测能到 6018 字)提示就第一个被切掉,
+            # 守卫等于没加 —— 而结果越长越是模型该收手的时候。
+            return json.dumps({"_system_hint": hint, **data}, ensure_ascii=False, default=str)
     except json.JSONDecodeError:
         pass
-    return json.dumps({"result": result_json, "_system_hint": hint}, ensure_ascii=False)
+    return json.dumps({"_system_hint": hint, "result": result_json}, ensure_ascii=False)
 
 
 def _next_seq(session, conversation_id: str) -> int:

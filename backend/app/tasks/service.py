@@ -230,7 +230,12 @@ def update_task(
                     if prev["status"] in ("pending", "in_progress"):
                         prev["status"] = "done"
                         prev["updated_at"] = now_iso
-                task.current_step = step_key
+                # 必须写解析后的真实 key,不能写模型传进来的原始字符串。
+                # 引入标题/别名匹配之后 step_key 可能是「核实物流」这类别名,
+                # 直接写进去会让 current_step 变成 steps 里不存在的值 ——
+                # 前端当前步骤高亮丢失,之后只带 note 的调用也会因为找不到
+                # 当前步骤而把备注静默丢掉。
+                task.current_step = steps[idx]["key"]
                 if task.status == "done":
                     task.status = "active"
         if note:
