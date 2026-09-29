@@ -224,3 +224,42 @@ def test_state_machine_stays_consistent_after_bad_key(session):
     t = service.update_task(session, t.id, step_key="不存在的步骤", step_status="done")
     running = [s["key"] for s in t.steps if s["status"] == "in_progress"]
     assert len(running) == 1, f"同时处于进行中的步骤不止一个:{running}"
+
+
+def test_material_tools_hide_database_id(session):
+    """材料的数据库自增 id 不能给模型看见。
+
+    模型看到 id 就会说"材料#3",而界面上材料是按标题展示的,
+    用户对不上号(测试报告之外发现的可用性问题)。
+    这个 id 对模型也没有任何用处 —— 没有工具接受材料 id。
+    """
+    from app.agent.tools import ToolContext, execute
+    import json as _json
+
+    from app.models import Conversation
+
+    c = Conversation(title="t", agent_type="claim")
+    session.add(c)
+    session.commit()
+    t = service.create_task(session, "claim", "索赔", {}, c.id)
+    ctx = ToolContext(session=session, conversation_id=c.id, task=t)
+
+    out, err = execute("save_material", ctx, {"title": "索赔话术", "kind": "script", "content": "正文"})
+    assert not err
+    saved = _json.loads(out)
+    assert "id" not in saved, "不该把数据库 id 暴露给模型"
+    assert saved["title"] == "索赔话术"
+    assert "标题" in saved.get("提示", "")
+
+    out2, err2 = execute("list_materials", ctx, {})
+    assert not err2
+    listed = _json.loads(out2)
+    assert all("id" not in m for m in listed["materials"])
+    assert listed["materials"][0]["title"] == "索赔话术"
+
+
+def test_prompt_forbids_material_numbering():
+    from app.agent.prompts import build_system_prompt
+
+    p = build_system_prompt("claim")
+    assert "不要说编号" in p

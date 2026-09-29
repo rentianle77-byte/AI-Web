@@ -23,6 +23,10 @@ const input = ref('')
 // 窄屏下三栏放不下,用底部标签在「对话」和「任务」之间切,侧栏做成抽屉
 const mobileView = ref('chat')
 const sidebarOpen = ref(false)
+// 抽屉关着的时候要从 Tab 焦点顺序里摘掉,否则键盘用户会 Tab 进看不见的元素。
+// 只在窄屏生效 —— 桌面端侧栏是常驻可见的
+const isNarrow = ref(false)
+let mql = null
 const sending = ref(false)
 const errorMsg = ref('')
 const previewMaterial = ref(null)
@@ -36,12 +40,22 @@ const clockShifted = computed(() => Math.abs(clock.value?.offset_hours ?? 0) > 0
 
 // ---------------- 生命周期 ----------------
 onMounted(async () => {
+  mql = window.matchMedia('(max-width: 1100px)')
+  isNarrow.value = mql.matches
+  mql.addEventListener('change', onBreakpoint)
   await Promise.all([refreshStatus(), loadConversations(), loadScenarios()])
   eventSource = connectEvents(onServerEvent)
 })
+
+function onBreakpoint(e) {
+  isNarrow.value = e.matches
+  // 从窄屏放大回桌面时,抽屉状态要清掉,否则遮罩会残留
+  if (!e.matches) sidebarOpen.value = false
+}
 onUnmounted(() => {
   eventSource?.close()
   activeStream?.abort()
+  mql?.removeEventListener('change', onBreakpoint)
 })
 
 async function refreshStatus() {
@@ -225,6 +239,13 @@ function onKeydown(e) {
   }
 }
 
+// 切回「对话」标签时要把滚动条拉到底:在「任务」页期间到达的消息
+// (主动跟进推送、后台刷新)不会触发滚动,回来会停在旧位置,看不到新内容
+function showChat() {
+  mobileView.value = 'chat'
+  scrollToBottom()
+}
+
 function scrollToBottom() {
   nextTick(() => {
     const el = scroller.value
@@ -293,7 +314,7 @@ async function refreshTaskPanel() {
 
       <div v-if="sidebarOpen" class="drawer-mask" @click="sidebarOpen = false" />
       <!-- 左:会话列表 -->
-      <aside class="sidebar" :class="{ open: sidebarOpen }">
+      <aside class="sidebar" :class="{ open: sidebarOpen }" :inert="isNarrow && !sidebarOpen">
         <button class="btn btn-primary new-btn" @click="newConversation">+ 新建对话</button>
         <div class="conv-list">
           <div
@@ -388,7 +409,7 @@ async function refreshTaskPanel() {
     </div>
 
     <nav class="mobile-tabs">
-      <button :class="{ active: mobileView === 'chat' }" @click="mobileView = 'chat'">
+      <button :class="{ active: mobileView === 'chat' }" @click="showChat">
         <span>💬</span> 对话
       </button>
       <button :class="{ active: mobileView === 'task' }" @click="mobileView = 'task'">
@@ -542,7 +563,9 @@ async function refreshTaskPanel() {
   .bubble { max-width: 86%; }
 
   /* 顶栏会挤成一团,让它能横向滚动;品牌名不加 nowrap 会被压成一列竖字 */
-  .topbar { gap: 10px; padding: 8px 12px; overflow-x: auto; }
+  /* 用换行而不是横向滚动:overflow-x:auto 在非覆盖式滚动条的平台上会常驻
+     一条滚动条,而且用户横向滚动后汉堡按钮会被推出视口 */
+  .topbar { gap: 8px 10px; padding: 8px 12px; flex-wrap: wrap; }
   .brand { flex: 0 0 auto; }
   .brand-name { white-space: nowrap; }
   .brand-sub { display: none; }

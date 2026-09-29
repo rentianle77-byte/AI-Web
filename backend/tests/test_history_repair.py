@@ -32,24 +32,45 @@ def tool_result(call_id, content='{"hits":[]}'):
 
 
 def pairs_ok(history):
-    """按模型协议校验:每个 tool_call 都有结果,每个结果都有来源。"""
+    """按网关的真实约束校验历史。
+
+    实测网关拒绝的形态有三种,这里都要覆盖:
+      1. tool_call 没有对应的 tool_result
+      2. tool_result 找不到对应的 tool_call(孤立结果)
+      3. 同一个 tool_call_id 出现多条结果(重复应答)
+
+    还有一条「紧邻」约束:tool_result 必须紧跟在发起调用的那条
+    assistant 之后,中间不能插别的角色。
+    """
     pending: set[str] = set()
     seen: set[str] = set()
+    answered: set[str] = set()
+    prev_role = None
     for e in history:
-        if e["role"] == "assistant":
+        role = e["role"]
+        if role == "assistant":
             if pending:
                 return False, f"上一组工具调用未闭合:{pending}"
             for c in e.get("tool_calls") or []:
-                pending.add(c["id"])
-                seen.add(c["id"])
-        elif e["role"] == "tool":
+                cid = c["id"]
+                if cid in seen:
+                    return False, f"tool_call id 重复:{cid}"
+                pending.add(cid)
+                seen.add(cid)
+        elif role == "tool":
             cid = e.get("tool_call_id")
             if cid not in seen:
                 return False, f"孤立的工具结果:{cid}"
+            if cid in answered:
+                return False, f"同一个 tool_call 有多条结果:{cid}"
+            if prev_role not in ("assistant", "tool"):
+                return False, f"工具结果没有紧跟在发起调用的 assistant 之后:{cid}"
+            answered.add(cid)
             pending.discard(cid)
-        elif e["role"] == "user":
+        elif role == "user":
             if pending:
                 return False, f"工具调用后直接跟了用户消息:{pending}"
+        prev_role = role
     return (not pending), (f"历史以未闭合的工具调用收尾:{pending}" if pending else "")
 
 
@@ -193,17 +214,68 @@ def test_repetition_hint_not_persisted():
 
     落库的话,下一轮回放时模型会看到一条过期的提示,反而被误导。
     正确做法:数据库存原始工具结果,提示只加在本轮发给模型的历史里。
+
+    这条测的是实际落库内容,不是源码里的变量名 —— 变量改名不该让测试失效,
+    而行为变了必须让测试失败。
     """
-    import inspect
-    from app.agent import runtime
+    import asyncio
 
-    src = inspect.getsource(runtime.run_turn)
-    persist = [l for l in src.splitlines() if 'add_message(session, conv.id, "tool"' in l]
-    assert persist, "没找到工具结果落库那一行"
-    assert "hinted" not in persist[0], "落库用的应该是原始结果,不是加了提示的版本"
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
 
-    to_model = [l for l in src.splitlines() if 'history.append({"role": "tool"' in l]
-    assert to_model and "hinted" in to_model[0], "发给模型的历史应该用加了提示的版本"
+    import app.agent.runtime as runtime
+    import app.followup.scheduler as sched
+    import app.db as db_mod
+    from app.db import Base
+    from app.llm.base import LLMEvent, LLMClient, ToolCall
+    from app.models import Conversation, Message
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    maker = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+
+    class RepeatSearcher(LLMClient):
+        """连查 5 次知识库,足以越过收敛阈值。"""
+
+        provider, model = "stub", "stub"
+
+        def __init__(self):
+            self.n = 0
+
+        async def astream(self, system, messages, tools=None):
+            self.n += 1
+            if self.n <= 5:
+                yield LLMEvent(type="tool_call", tool_call=ToolCall(id=f"c{self.n}", name="search_knowledge", arguments={"query": "赔偿"}))
+                yield LLMEvent(type="done", stop_reason="tool_use")
+            else:
+                yield LLMEvent(type="text_delta", text="查完了")
+                yield LLMEvent(type="done", stop_reason="end_turn")
+
+    old_sessions = (db_mod.SessionLocal, runtime.SessionLocal, sched.SessionLocal)
+    db_mod.SessionLocal = runtime.SessionLocal = sched.SessionLocal = maker
+    try:
+        s = maker()
+        c = Conversation(title="t", agent_type="claim")
+        s.add(c)
+        s.commit()
+        cid = c.id
+        s.close()
+
+        async def go():
+            async for _ in runtime.run_turn(cid, "未保价破损赔多少", client=RepeatSearcher()):
+                pass
+
+        asyncio.run(go())
+
+        s = maker()
+        tool_msgs = list(s.scalars(select(Message).where(Message.conversation_id == cid, Message.role == "tool")))
+        s.close()
+        assert len(tool_msgs) >= 4, f"应该记录了多次检索,实际 {len(tool_msgs)}"
+        for m in tool_msgs:
+            assert "_system_hint" not in m.content, "收敛提示不该出现在落库内容里"
+            assert "你已经调用" not in m.content
+    finally:
+        db_mod.SessionLocal, runtime.SessionLocal, sched.SessionLocal = old_sessions
 
 
 # ---------------- FT-08:跟进触发提示不该在后续轮次反复生效 ----------------
@@ -288,3 +360,187 @@ def test_repetition_hint_survives_truncation():
     out = _truncate(_guard_repetition("compare_shipping", ["compare_shipping"] * MAX_SAME_TOOL_CALLS, big))
     assert "不要再用同义词重复检索" in out
     assert out.index("_system_hint") < 50, "提示应该在最前面"
+
+
+# ---------------- 写入侧:中断时补占位结果 ----------------
+# 这是线上真实故障(FT-09/FT-11)对应的第一道防线,之前完全没有测试覆盖。
+def _wire(tmp_engine_holder):
+    """把三处 SessionLocal 换成临时库,返回 (maker, 还原函数)。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.agent.runtime as runtime
+    import app.db as db_mod
+    import app.followup.scheduler as sched
+    from app.db import Base
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    maker = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    tmp_engine_holder.append(engine)
+    old = (db_mod.SessionLocal, runtime.SessionLocal, sched.SessionLocal)
+    db_mod.SessionLocal = runtime.SessionLocal = sched.SessionLocal = maker
+
+    def restore():
+        db_mod.SessionLocal, runtime.SessionLocal, sched.SessionLocal = old
+
+    return maker, restore
+
+
+def test_client_disconnect_leaves_no_dangling_calls():
+    """客户端在工具执行中途断开,库里不能留下「有调用没结果」的记录。
+
+    这正是线上那个"点了停止,该会话从此永久 400"的成因。
+    """
+    import asyncio
+
+    from sqlalchemy import select
+
+    import app.agent.runtime as runtime
+    from app.llm.base import LLMClient, LLMEvent, ToolCall
+    from app.models import Conversation, Message
+
+    holder = []
+    maker, restore = _wire(holder)
+    try:
+        class ThreeTools(LLMClient):
+            provider, model = "stub", "stub"
+
+            async def astream(self, system, messages, tools=None):
+                yield LLMEvent(type="text_delta", text="我查一下")
+                for i in (1, 2, 3):
+                    yield LLMEvent(type="tool_call", tool_call=ToolCall(id=f"call_{i}", name="get_current_time", arguments={}))
+                yield LLMEvent(type="done", stop_reason="tool_use")
+
+        s = maker()
+        c = Conversation(title="t", agent_type="claim")
+        s.add(c)
+        s.commit()
+        cid = c.id
+        s.close()
+
+        async def go():
+            gen = runtime.run_turn(cid, "我的快递坏了", client=ThreeTools())
+            async for ev in gen:
+                if ev["type"] == "tool_start":
+                    await gen.aclose()  # 模拟用户点「停止」
+                    break
+
+        asyncio.run(go())
+
+        s = maker()
+        msgs = list(s.scalars(select(Message).where(Message.conversation_id == cid).order_by(Message.seq)))
+        s.close()
+
+        called, answered = set(), set()
+        for m in msgs:
+            meta = m.meta or {}
+            if m.role == "assistant":
+                called.update(c["id"] for c in meta.get("tool_calls") or [])
+            elif m.role == "tool":
+                answered.add(meta.get("tool_call_id"))
+        assert called, "应该记录了工具调用"
+        assert called <= answered, f"有调用没结果:{called - answered}"
+        assert any((m.meta or {}).get("interrupted") for m in msgs), "被中断的应该打上标记"
+    finally:
+        restore()
+
+
+def test_interrupted_placeholders_keep_seq_order():
+    """占位结果的 seq 必须排在发起调用那条之后,不能乱序。
+
+    取消时 finally 可能晚执行,如果沿用外层 session 直接 add,
+    seq 会插到后续消息之后,历史顺序就错了。
+    """
+    from sqlalchemy import select
+
+    import app.agent.runtime as runtime
+    from app.models import Conversation, Message
+
+    holder = []
+    maker, restore = _wire(holder)
+    try:
+        s = maker()
+        c = Conversation(title="t", agent_type="claim")
+        s.add(c)
+        s.commit()
+        cid = c.id
+        runtime.add_message(s, cid, "user", "你好", {})
+        runtime.add_message(s, cid, "assistant", "查一下", {"tool_calls": [{"id": "x1", "name": "get_current_time", "arguments": {}}]})
+        s.commit()
+        s.close()
+
+        class FakeCall:
+            name = "get_current_time"
+
+        runtime._persist_interrupted_calls(cid, {"x1": FakeCall()})
+
+        s = maker()
+        msgs = list(s.scalars(select(Message).where(Message.conversation_id == cid).order_by(Message.seq)))
+        s.close()
+        assert [m.role for m in msgs] == ["user", "assistant", "tool"]
+        assert [m.seq for m in msgs] == sorted(m.seq for m in msgs)
+        assert msgs[-1].meta["tool_call_id"] == "x1"
+    finally:
+        restore()
+
+
+def test_persist_interrupted_survives_broken_outer_session():
+    """外层 session 处于异常状态时,补占位也必须成功。
+
+    _persist_interrupted_calls 用独立 session 就是为了这个 ——
+    沿用外层会抛 PendingRollbackError 然后被静默吞掉。
+    """
+    from sqlalchemy import select
+
+    import app.agent.runtime as runtime
+    from app.models import Conversation, Message
+
+    holder = []
+    maker, restore = _wire(holder)
+    try:
+        s = maker()
+        c = Conversation(title="t", agent_type="claim")
+        s.add(c)
+        s.commit()
+        cid = c.id
+        runtime.add_message(s, cid, "user", "你好", {})
+        s.commit()
+
+        # 把外层 session 弄成脏状态
+        try:
+            s.execute(select(Message).where(Message.nonexistent == 1))  # noqa
+        except Exception:
+            pass
+
+        class FakeCall:
+            name = "search_knowledge"
+
+        runtime._persist_interrupted_calls(cid, {"y1": FakeCall()})
+        s.close()
+
+        s2 = maker()
+        tools = list(s2.scalars(select(Message).where(Message.conversation_id == cid, Message.role == "tool")))
+        s2.close()
+        assert len(tools) == 1 and tools[0].meta["tool_call_id"] == "y1"
+    finally:
+        restore()
+
+
+# ---------------- 收敛护栏不能误伤写入类工具 ----------------
+def test_repetition_guard_exempts_write_tools():
+    """update_task / save_material 天然就该被多次调用,不能劝阻模型继续调。"""
+    from app.agent.runtime import REPETITION_EXEMPT, _guard_repetition
+
+    for name in ("update_task", "save_material", "schedule_followup", "create_task"):
+        assert name in REPETITION_EXEMPT
+        out = _guard_repetition(name, [name] * 9, '{"ok":true}')
+        assert out == '{"ok":true}', f"{name} 不该被加提示"
+
+
+def test_repetition_guard_still_applies_to_query_tools():
+    from app.agent.runtime import MAX_SAME_TOOL_CALLS, _guard_repetition
+
+    for name in ("search_knowledge", "query_tracking", "compare_shipping"):
+        out = _guard_repetition(name, [name] * MAX_SAME_TOOL_CALLS, '{"hits":[]}')
+        assert "_system_hint" in out, f"{name} 应该受护栏约束"

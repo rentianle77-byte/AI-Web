@@ -97,7 +97,9 @@ MIN_FUZZY_LEN = 5
 
 
 def _normalize(text: str) -> str:
-    return "".join(ch for ch in (text or "").lower() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+    # 只留字母数字和汉字。注意中文本身就满足 isalnum(),
+    # 所以不需要再单独判 CJK 区间(之前那段是死代码)。
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum())
 
 
 def resolve_step(steps: list[dict], wanted: str, current_step: str | None) -> tuple[int | None, str | None, bool]:
