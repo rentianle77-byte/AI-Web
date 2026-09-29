@@ -544,3 +544,73 @@ def test_repetition_guard_still_applies_to_query_tools():
     for name in ("search_knowledge", "query_tracking", "compare_shipping"):
         out = _guard_repetition(name, [name] * MAX_SAME_TOOL_CALLS, '{"hits":[]}')
         assert "_system_hint" in out, f"{name} 应该受护栏约束"
+
+
+# ---------------- 并发下 seq 重号,顺序仍须确定 ----------------
+def test_history_order_deterministic_when_seq_collides():
+    """seq 是「先读 max 再加一」算出来的,并发下必然重号。
+
+    现实场景:跟进调度器每 10 秒扫一次到期跟进,完全可能在用户
+    正在对话时触发同一个会话。MySQL 不像 SQLite 那样锁整表,
+    所以线上一定会撞。
+
+    重号本身可以接受,但读取侧的顺序必须是确定的 ——
+    只按 seq 排序的话,谁先谁后由数据库决定,
+    可能把工具调用和它的结果拆开,直接导致网关 400。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.agent.runtime as runtime
+    import app.db as db_mod
+    from app.db import Base
+    from app.models import Conversation, Message
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    maker = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    old = (db_mod.SessionLocal, runtime.SessionLocal)
+    db_mod.SessionLocal = runtime.SessionLocal = maker
+    try:
+        s = maker()
+        c = Conversation(title="t", agent_type="claim")
+        s.add(c)
+        s.commit()
+        cid = c.id
+        runtime.add_message(s, cid, "user", "第一句", {})
+        s.commit()
+
+        # 人为制造重号:两条都是 seq=2
+        s.add(Message(conversation_id=cid, seq=2, role="assistant", content="先写的", meta={}))
+        s.commit()
+        s.add(Message(conversation_id=cid, seq=2, role="user", content="后写的", meta={}))
+        s.commit()
+
+        h = runtime.build_llm_history(s, cid)
+        assert [e["content"] for e in h] == ["第一句", "先写的", "后写的"], "重号时应按写入先后排序"
+        s.close()
+    finally:
+        db_mod.SessionLocal, runtime.SessionLocal = old
+
+
+def test_next_seq_falls_back_without_row_locking():
+    """with_for_update 在 SQLite 上不支持,必须能降级,否则本地开发直接崩。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.agent.runtime as runtime
+    from app.db import Base
+    from app.models import Conversation
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)()
+    c = Conversation(title="t", agent_type="claim")
+    s.add(c)
+    s.commit()
+    seqs = []
+    for i in range(4):
+        seqs.append(runtime.add_message(s, c.id, "user", f"第{i}句", {}).seq)
+        s.commit()
+    assert seqs == [1, 2, 3, 4]
+    s.close()

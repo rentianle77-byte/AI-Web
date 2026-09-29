@@ -114,7 +114,23 @@ def _persist_interrupted_calls(conversation_id: str, pending: dict) -> None:
 
 
 def _next_seq(session, conversation_id: str) -> int:
-    current = session.scalar(select(func.max(Message.seq)).where(Message.conversation_id == conversation_id))
+    """算下一条消息的序号。
+
+    这是「先读 max 再加一」的经典竞争:两路并发时会读到同一个值。
+    现实里很容易撞上 —— 跟进调度器每 10 秒扫一次到期跟进,
+    完全可能在用户正在对话时触发同一个会话。
+
+    MySQL 不像 SQLite 那样把整表锁住,所以线上一定会出现重号。
+    重号本身不致命(读取侧按 (seq, id) 排序,顺序是确定的),
+    但 seq 不再连续会让排查问题变困难,所以这里尽量减少撞车:
+    加 with_for_update 让 MySQL 在读的时候就锁住这批行。
+    SQLite 不支持行锁,会被 SQLAlchemy 忽略,本地开发不受影响。
+    """
+    stmt = select(func.max(Message.seq)).where(Message.conversation_id == conversation_id)
+    try:
+        current = session.scalar(stmt.with_for_update())
+    except Exception:  # noqa: BLE001  —— SQLite 等不支持行锁的后端
+        current = session.scalar(stmt)
     return (current or 0) + 1
 
 
@@ -216,7 +232,13 @@ def build_llm_history(session, conversation_id: str, limit: int = 60) -> list[di
     """把数据库里的消息还原成 LLM 需要的格式(含 tool_call / tool_result 配对)。"""
     rows = list(
         session.scalars(
-            select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq.desc()).limit(limit)
+            # 排序用 (seq, id):seq 是应用层算的 max+1,并发下会重号
+            # (跟进调度器每 10 秒扫一次,完全可能撞上用户正在对话),
+            # 重号时由数据库自增主键 id 决定先后,顺序才是确定的。
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.seq.desc(), Message.id.desc())
+            .limit(limit)
         )
     )[::-1]
     history: list[dict] = []
