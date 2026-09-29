@@ -20,7 +20,7 @@ from app.events import bus
 from app.followup import scheduler
 from app.llm.factory import get_client
 from app.rag.index import index
-from app.routers import chat, demo, tasks, tools_api
+from app.routers import chat, demo, notify_api, tasks, tools_api
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("express-agent")
@@ -64,6 +64,7 @@ app.include_router(chat.router)
 app.include_router(tasks.router)
 app.include_router(tools_api.router)
 app.include_router(demo.router)
+app.include_router(notify_api.router)
 
 
 @app.get("/api/health")

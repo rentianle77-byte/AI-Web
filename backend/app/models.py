@@ -107,3 +107,27 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
+
+
+class TrackingWatch(Base):
+    """在盯的包裹。
+
+    「用户问了才查」和「系统自己盯着」是两种产品。后者才配叫管家:
+    包裹卡住三天、派送异常、签收了,不用用户开口。
+    """
+
+    __tablename__ = "tracking_watches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tracking_no: Mapped[str] = mapped_column(String(64), index=True)
+    company: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # watching | stopped
+    status: Mapped[str] = mapped_column(String(16), default="watching")
+    # 上次归类出的状态:in_transit / delivered / exception / stalled / damaged
+    last_state: Mapped[str] = mapped_column(String(24), default="")
+    # 上次看到的最新轨迹时间,用来判断「轨迹动没动」
+    last_event_time: Mapped[str] = mapped_column(String(32), default="")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=clock.now)

@@ -459,6 +459,7 @@ async def run_followup(followup_id: int) -> list[dict]:
         f.fired_at = clock.now()
         conversation_id = f.conversation_id
         message = f.message
+        task_id = f.task_id
         session.commit()
     finally:
         session.close()
@@ -473,4 +474,39 @@ async def run_followup(followup_id: int) -> list[dict]:
         if ev["type"] in ("message_saved", "task_update", "material", "followup", "error"):
             bus.publish({**ev, "conversation_id": conversation_id, "from_followup": True})
     bus.publish({"type": "followup_done", "followup_id": followup_id, "conversation_id": conversation_id})
+
+    # 推到用户手机上。不这么做的话「主动跟进」只有用户
+    # 恰好开着网页才看得见 —— 那就不叫主动了。
+    _notify_followup_result(task_id, conversation_id, message, events)
     return events
+
+
+def _notify_followup_result(task_id: str | None, conversation_id: str, message: str, events: list[dict]) -> None:
+    """把这轮跟进的结论推给用户。通知失败绝不能影响跟进本身。"""
+    from ..notify import notify_followup
+
+    try:
+        reply = ""
+        for ev in reversed(events):
+            if ev.get("type") == "message_saved" and ev.get("message", {}).get("role") == "assistant":
+                reply = ev["message"].get("content") or ""
+                if reply:
+                    break
+        title = "快递跟进"
+        if task_id:
+            session = SessionLocal()
+            try:
+                t = session.get(Task, task_id)
+                if t:
+                    title = t.title
+            finally:
+                session.close()
+        result = notify_followup(title, task_id or "-", message, reply, conversation_id)
+        bus.publish({
+            "type": "notify_sent",
+            "conversation_id": conversation_id,
+            "ok": result.sent,
+            "summary": result.summary(),
+        })
+    except Exception:  # noqa: BLE001
+        log.exception("跟进通知发送失败(不影响跟进本身)")
