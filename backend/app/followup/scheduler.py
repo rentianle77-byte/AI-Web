@@ -34,6 +34,7 @@ def due_followup_ids() -> list[int]:
 async def _tick() -> int:
     from ..agent.runtime import run_followup
 
+    _check_tracking()
     fired = 0
     for fid in due_followup_ids():
         try:
@@ -51,6 +52,29 @@ async def _tick() -> int:
             finally:
                 session.close()
     return fired
+
+
+def _check_tracking() -> None:
+    """巡检在盯的包裹。放在跟进扫描的同一个节拍里,不另起定时器。
+
+    物流状态变化对实时性要求很低,和跟进共用节拍足够,
+    也省掉一套并发控制。
+    """
+    from ..tracking import watcher
+
+    session = SessionLocal()
+    try:
+        changes = watcher.check_all(session)
+        session.commit()
+    except Exception:  # noqa: BLE001  —— 巡检失败不能拖垮跟进
+        log.exception("包裹巡检出错")
+        session.rollback()
+        return
+    finally:
+        session.close()
+    for c in changes:
+        log.info("包裹 %s 状态变化:%s", c["tracking_no"], c["label"])
+        watcher.announce(c)
 
 
 async def _loop() -> None:

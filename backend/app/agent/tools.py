@@ -96,6 +96,45 @@ def _query_tracking(ctx: ToolContext, args: dict) -> Any:
     return query_tracking(args["tracking_no"], args.get("company"), args.get("scenario_hint"))
 
 
+# ============================= 包裹监控 =============================
+@tool(
+    "watch_package",
+    "开始盯这个包裹:之后物流一有变化(签收、派送异常、连续多天没更新),"
+    "系统会自己发现并主动通知用户,不用用户回来问。"
+    "拿到单号后就调用 —— 这是产品「替你盯着」的核心能力。",
+    _obj(
+        {
+            "tracking_no": {"type": "string", "description": "快递单号"},
+            "company": {"type": "string", "description": "快递公司,不填会按单号规则猜"},
+        },
+        ["tracking_no"],
+    ),
+)
+def _watch_package(ctx: ToolContext, args: dict) -> Any:
+    from ..tracking import watcher
+
+    task = ctx.task
+    w = watcher.watch(ctx.session, args["tracking_no"].strip(), args.get("company"),
+                      task.id if task else None, ctx.conversation_id)
+    return {
+        "tracking_no": w.tracking_no,
+        "status": "已开始监控",
+        "说明": "物流出现签收、派送异常、或连续 3 天没更新时,系统会主动通知用户,不需要他再来问。"
+                "告诉用户这件事 —— 这是他能少操心的地方。",
+    }
+
+
+@tool(
+    "stop_watching_package",
+    "不再盯某个包裹(事情已经解决时调用)。",
+    _obj({"tracking_no": {"type": "string", "description": "快递单号"}}, ["tracking_no"]),
+)
+def _stop_watching(ctx: ToolContext, args: dict) -> Any:
+    from ..tracking import watcher
+
+    return {"stopped": watcher.unwatch(ctx.session, args["tracking_no"].strip())}
+
+
 # ============================= 索赔评估 =============================
 @tool(
     "assess_claim",
@@ -174,6 +213,58 @@ def _check_return(ctx: ToolContext, args: dict) -> Any:
 )
 def _compare_shipping(ctx: ToolContext, args: dict) -> Any:
     return estimate(**{k: v for k, v in args.items() if v is not None})
+
+
+# ============================= 寄件下单 =============================
+@tool(
+    "place_shipping_order",
+    "真的把快递下单出去,并预约上门取件。这是产品唯一能做到端到端闭环的能力 —— "
+    "用户说一句话,系统真的帮他下单。"
+    "调用前必须先用 compare_shipping 比过价,并且**跟用户确认过方案和寄收件人信息**。"
+    "缺寄件人或收件人的姓名、电话、详细地址时不要调,先问清楚。",
+    _obj(
+        {
+            "from_place": {"type": "string", "description": "寄出城市"},
+            "to_place": {"type": "string", "description": "寄达城市"},
+            "weight_kg": {"type": "number", "description": "重量(公斤)"},
+            "item_type": {"type": "string", "description": "物品描述"},
+            "declared_value": {"type": "number", "description": "保价金额(元),贵重物品务必填"},
+            "carrier_hint": {"type": "string", "description": "用户选定的承运商,来自 compare_shipping 的推荐"},
+            "sender_name": {"type": "string", "description": "寄件人姓名"},
+            "sender_phone": {"type": "string", "description": "寄件人手机号"},
+            "sender_address": {"type": "string", "description": "寄件人详细地址"},
+            "receiver_name": {"type": "string", "description": "收件人姓名"},
+            "receiver_phone": {"type": "string", "description": "收件人手机号"},
+            "receiver_address": {"type": "string", "description": "收件人详细地址"},
+            "pickup_at": {"type": "string", "description": "希望的上门取件时间,格式 2026-09-30 14:00"},
+        },
+        ["from_place", "to_place", "weight_kg"],
+    ),
+)
+def _place_shipping_order(ctx: ToolContext, args: dict) -> Any:
+    from ..shipping.order import place_order
+    from ..tracking import watcher
+
+    result = place_order(
+        from_place=args["from_place"],
+        to_place=args["to_place"],
+        weight_kg=float(args["weight_kg"]),
+        item_type=args.get("item_type", ""),
+        declared_value=args.get("declared_value"),
+        carrier_hint=args.get("carrier_hint"),
+        pickup_at=args.get("pickup_at"),
+        sender={"name": args.get("sender_name", ""), "phone": args.get("sender_phone", ""), "address": args.get("sender_address", "")},
+        receiver={"name": args.get("receiver_name", ""), "phone": args.get("receiver_phone", ""), "address": args.get("receiver_address", "")},
+    )
+    d = result.to_dict()
+    if result.ok and result.tracking_no:
+        # 下完单立刻开始盯:这才是闭环 —— 用户说一句话,
+        # 后面签收与否系统自己跟,不用他再问
+        task = ctx.task
+        watcher.watch(ctx.session, result.tracking_no, result.provider,
+                      task.id if task else None, ctx.conversation_id)
+        d["已自动开始监控"] = "物流有变化(签收 / 异常 / 停滞)会主动通知用户"
+    return d
 
 
 # ============================= 任务管理 =============================
@@ -324,10 +415,10 @@ def get_tools(agent_type: str) -> list[ToolSpec]:
     """按 Agent 类型给不同的工具子集,减少模型选错工具的概率。"""
     common = ["search_knowledge", "get_current_time", "create_task", "update_task", "schedule_followup", "list_followups", "cancel_followups", "save_material", "list_materials"]
     extra = {
-        "claim": ["query_tracking", "assess_claim"],
-        "return": ["check_return_eligibility", "compare_shipping", "query_tracking"],
-        "ship": ["compare_shipping", "query_tracking"],
-    }.get(agent_type, ["query_tracking", "assess_claim", "check_return_eligibility", "compare_shipping"])
+        "claim": ["query_tracking", "watch_package", "stop_watching_package", "assess_claim"],
+        "return": ["check_return_eligibility", "compare_shipping", "query_tracking", "watch_package"],
+        "ship": ["compare_shipping", "query_tracking", "watch_package", "place_shipping_order"],
+    }.get(agent_type, ["query_tracking", "watch_package", "assess_claim", "check_return_eligibility", "compare_shipping"])
     names = common + extra
     return [_REGISTRY[n][0] for n in names if n in _REGISTRY]
 
@@ -351,6 +442,9 @@ def tool_display_name(name: str) -> str:
     return {
         "search_knowledge": "查知识库",
         "query_tracking": "查物流",
+        "watch_package": "开始盯包裹",
+        "stop_watching_package": "停止监控",
+        "place_shipping_order": "下单寄件",
         "assess_claim": "评估索赔",
         "check_return_eligibility": "判断退货资格",
         "compare_shipping": "对比寄件方案",

@@ -36,6 +36,20 @@ class Settings:
     kuaidi100_customer: str | None
     knowledge_dir: Path
     data_dir: Path
+    smtp_host: str | None
+    smtp_port: int
+    smtp_user: str | None
+    smtp_password: str | None
+    smtp_ssl: bool
+    smtp_from_name: str
+    serverchan_key: str | None
+    notify_webhook_url: str | None
+    notify_default_contact: str | None
+    public_base_url: str | None
+    sf_partner_id: str | None
+    sf_checkword: str | None
+    sf_monthly_card: str | None
+    sf_base_url: str
     cors_origins: list[str]
     followup_interval: int
     max_tool_iterations: int
@@ -94,6 +108,20 @@ def load_settings() -> Settings:
         kuaidi100_customer=_env("KUAIDI100_CUSTOMER"),
         knowledge_dir=BACKEND_DIR / "knowledge",
         data_dir=data_dir,
+        smtp_host=_env("SMTP_HOST"),
+        smtp_port=int(_env("SMTP_PORT", "465")),
+        smtp_user=_env("SMTP_USER"),
+        smtp_password=_env("SMTP_PASSWORD"),
+        smtp_ssl=(_env("SMTP_SSL", "true") or "true").lower() not in ("0", "false", "no"),
+        smtp_from_name=_env("SMTP_FROM_NAME", "快递管家"),
+        serverchan_key=_env("SERVERCHAN_KEY"),
+        notify_webhook_url=_env("NOTIFY_WEBHOOK_URL"),
+        notify_default_contact=_env("NOTIFY_DEFAULT_CONTACT"),
+        public_base_url=_env("PUBLIC_BASE_URL"),
+        sf_partner_id=_env("SF_PARTNER_ID"),
+        sf_checkword=_env("SF_CHECKWORD"),
+        sf_monthly_card=_env("SF_MONTHLY_CARD"),
+        sf_base_url=_env("SF_BASE_URL", "https://bspgw.sf-express.com"),
         cors_origins=[o.strip() for o in (_env("CORS_ORIGINS") or "").split(",") if o.strip()],
         followup_interval=int(_env("FOLLOWUP_CHECK_INTERVAL", "10")),
         max_tool_iterations=int(_env("MAX_TOOL_ITERATIONS", "12")),
