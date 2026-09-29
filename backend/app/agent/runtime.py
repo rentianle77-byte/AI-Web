@@ -38,6 +38,13 @@ def _truncate(text: str) -> str:
 # 同一个工具在一轮对话里连调多少次就该收手
 MAX_SAME_TOOL_CALLS = 3
 
+# 这些工具天然就该被多次调用,不能劝阻:
+#   update_task   每推进一步就更新一次,一轮调五六次很正常
+#   save_material 索赔场景通常要出话术 + 证据清单 + 申请书好几份
+#   schedule_followup 一个任务排多条跟进是设计如此
+# 护栏只针对"查询类"工具 —— 反复查同一件事才是空转。
+REPETITION_EXEMPT = frozenset({"update_task", "save_material", "schedule_followup", "create_task"})
+
 
 def _guard_repetition(tool_name: str, recent: list[str], result_json: str) -> str:
     """同一工具反复调用时,在结果里明说"别再查了",避免模型空转。
@@ -46,6 +53,8 @@ def _guard_repetition(tool_name: str, recent: list[str], result_json: str) -> st
     (「保价」「破损」「赔偿」「快递」),白白耗掉十几秒和大量 token。
     模型看不到自己调了几次,所以得由我们把这个事实塞回给它。
     """
+    if tool_name in REPETITION_EXEMPT:
+        return result_json
     used = recent.count(tool_name)
     if used < MAX_SAME_TOOL_CALLS:
         return result_json
@@ -65,6 +74,43 @@ def _guard_repetition(tool_name: str, recent: list[str], result_json: str) -> st
     except json.JSONDecodeError:
         pass
     return json.dumps({"_system_hint": hint, "result": result_json}, ensure_ascii=False)
+
+
+def _persist_interrupted_calls(conversation_id: str, pending: dict) -> None:
+    """给被中断的工具调用补占位结果。
+
+    单独开一个 session:被取消时外层 session 可能已经处于 PendingRollback
+    状态(循环里 commit 失败过),继续用它写必然抛异常并被静默吞掉。
+    新 session 也保证这次写入不受外层事务状态影响。
+    """
+    from ..agent import tools as tools_mod
+
+    session = SessionLocal()
+    try:
+        for cid, call in pending.items():
+            session.add(
+                Message(
+                    conversation_id=conversation_id,
+                    seq=_next_seq(session, conversation_id),
+                    role="tool",
+                    content=INCOMPLETE_TOOL_RESULT,
+                    meta={
+                        "tool_call_id": cid,
+                        "name": call.name,
+                        "display": tools_mod.tool_display_name(call.name),
+                        "is_error": True,
+                        "interrupted": True,
+                    },
+                )
+            )
+            session.flush()
+        session.commit()
+        log.info("对话 %s 有 %d 个工具调用被中断,已补占位结果", conversation_id, len(pending))
+    except Exception:  # noqa: BLE001
+        log.exception("补占位工具结果失败,读取侧的 repair_tool_pairing 会兜底")
+        session.rollback()
+    finally:
+        session.close()
 
 
 def _next_seq(session, conversation_id: str) -> int:
@@ -344,18 +390,17 @@ async def run_turn(
                     elif call.name in ("schedule_followup", "cancel_followups") and ctx.task:
                         yield {"type": "followup", "followups": [service.followup_to_dict(f) for f in service.list_followups(session, task_id=ctx.task.id)]}
             finally:
-                # 中途断开时把没跑完的工具补一条结果,不让残缺记录留在库里
+                # 中途断开时把没跑完的工具补一条结果,不让残缺记录留在库里。
+                #
+                # 两个坑:
+                # 1. 客户端断开时 FastAPI 会 cancel 这个生成器,而 asyncio 的取消
+                #    不保证 finally 立刻跑完 —— 占位结果可能晚写,seq 排到后续
+                #    消息之后,历史顺序就乱了。所以这里用独立 session 直接算 seq,
+                #    不依赖外层那个可能已经处于异常状态的 session。
+                # 2. 循环里如果 commit 失败,外层 session 处于 PendingRollback 状态,
+                #    这时再写必然抛异常并被吞掉。所以先 rollback。
                 if pending_calls:
-                    try:
-                        for cid, call in pending_calls.items():
-                            add_message(
-                                session, conv.id, "tool", INCOMPLETE_TOOL_RESULT,
-                                {"tool_call_id": cid, "name": call.name, "display": tools_mod.tool_display_name(call.name), "is_error": True, "interrupted": True},
-                            )
-                        session.commit()
-                        log.info("对话 %s 有 %d 个工具调用被中断,已补占位结果", conv.id, len(pending_calls))
-                    except Exception:  # noqa: BLE001
-                        log.exception("补占位工具结果失败")
+                    _persist_interrupted_calls(conv.id, pending_calls)
         else:
             yield {"type": "error", "message": f"工具调用超过 {settings.max_tool_iterations} 轮仍未收敛,已停止。"}
 

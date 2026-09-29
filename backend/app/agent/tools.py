@@ -293,14 +293,24 @@ def _cancel_followups(ctx: ToolContext, args: dict) -> Any:
 def _save_material(ctx: ToolContext, args: dict) -> Any:
     task = ctx.task
     m = service.save_material(ctx.session, task.id if task else None, ctx.conversation_id, args["title"], args["kind"], args["content"])
-    return service.material_to_dict(m)
+    d = service.material_to_dict(m)
+    # 不要把数据库自增 id 暴露给模型。它会照着说"材料#3",
+    # 而界面上材料是按标题展示的,用户根本对不上号。
+    # 这个 id 对模型也没用 —— 没有任何工具接受材料 id。
+    d.pop("id", None)
+    d["提示"] = f"跟用户提这份材料时说标题「{m.title}」,不要用编号 —— 界面上是按标题显示的。"
+    return d
 
 
 @tool("list_materials", "列出当前任务已生成的材料。", _obj({}))
 def _list_materials(ctx: ToolContext, args: dict) -> Any:
     task = ctx.task
     mats = service.list_materials(ctx.session, task_id=task.id if task else None, conversation_id=None if task else ctx.conversation_id)
-    return [{"id": m.id, "title": m.title, "kind": m.kind} for m in mats]
+    # 同样不给 id,统一用标题指代
+    return {
+        "materials": [{"title": m.title, "kind": m.kind, "created_at": clock.fmt_local(m.created_at)} for m in mats],
+        "提示": "跟用户提材料时一律说标题,界面上是按标题显示的,说编号用户找不到。",
+    }
 
 
 @tool("get_current_time", "获取当前日期时间。凡是要算天数、定期限、判断是否超时,都先调它,不要假设今天是哪天。", _obj({}))
