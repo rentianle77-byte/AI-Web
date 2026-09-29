@@ -66,7 +66,10 @@ def get_conversation(conversation_id: str):
         conv = session.get(Conversation, conversation_id)
         if not conv:
             raise HTTPException(404, "对话不存在")
-        msgs = session.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq))
+        # 次级键 id:seq 并发下会重号,单靠 seq 排序结果不确定
+        msgs = session.scalars(
+            select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq, Message.id)
+        )
         visible = [message_to_dict(m) for m in msgs if not (m.meta or {}).get("hidden")]
         task = session.get(__import__("app.models", fromlist=["Task"]).Task, conv.task_id) if conv.task_id else None
         return {
